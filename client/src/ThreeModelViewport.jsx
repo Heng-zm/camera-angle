@@ -1151,6 +1151,248 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
     return payload;
   };
 
+  const addGeneratedObject = (object, options = {}) => {
+    const root = modelRef.current;
+    if (!root || !object) return null;
+    object.name = String(options.name || object.name || "Generated Object").slice(0, 120);
+    object.userData.generatedByExtension = true;
+    object.traverse?.((node) => {
+      if (node.isMesh && !node.userData.originalViewportMaterial) node.userData.originalViewportMaterial = node.material;
+    });
+    root.add(object);
+    ensureSceneIds(object);
+    if (shadingMode !== "material") applyShading(object, shadingMode);
+    refreshGpuEstimate();
+    emitSceneGraph();
+    const id = object.userData?.sceneId || object.uuid;
+    selectObjectsByIds([id], false);
+    return { id, name: object.name, type: object.type || "Object" };
+  };
+
+  const proceduralNoise = (x, z, seed = 1) => {
+    const a = Math.sin((x + seed * 0.13) * 1.71) * 0.52;
+    const b = Math.cos((z - seed * 0.17) * 2.19) * 0.31;
+    const c = Math.sin((x + z + seed) * 0.87) * 0.17;
+    return a + b + c;
+  };
+
+  const createGeneratedObject = (kind, rawOptions = {}) => {
+    const options = rawOptions && typeof rawOptions === "object" ? rawOptions : {};
+    const radius = Math.max(modelRadiusRef.current || 1, 0.25);
+    const standardMaterial = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.78, metalness: 0.02, ...extra });
+    let object = null;
+
+    if (kind === "terrain") {
+      const size = THREE.MathUtils.clamp(Number(options.size) || radius * 4, 1, 100);
+      const segments = Math.round(THREE.MathUtils.clamp(Number(options.segments) || 64, 4, 180));
+      const height = THREE.MathUtils.clamp(Number(options.height) || size * 0.12, 0, size);
+      const seed = Number(options.seed) || 1;
+      const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
+      geometry.rotateX(-Math.PI / 2);
+      const position = geometry.attributes.position;
+      for (let index = 0; index < position.count; index += 1) {
+        const x = position.getX(index);
+        const z = position.getZ(index);
+        const edge = Math.min(1, Math.max(0, 1 - Math.max(Math.abs(x), Math.abs(z)) / (size * 0.5)));
+        position.setY(index, proceduralNoise(x / Math.max(size * 0.15, 0.001), z / Math.max(size * 0.15, 0.001), seed) * height * (0.45 + edge * 0.55));
+      }
+      position.needsUpdate = true;
+      geometry.computeVertexNormals();
+      object = new THREE.Mesh(geometry, standardMaterial(options.color || 0x60775d));
+      object.position.y = -radius * 0.6;
+    } else if (kind === "tree") {
+      const height = THREE.MathUtils.clamp(Number(options.height) || radius * 2.4, 0.5, 40);
+      const crownRadius = THREE.MathUtils.clamp(Number(options.crownRadius) || height * 0.32, 0.2, height);
+      const group = new THREE.Group();
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(height * 0.07, height * 0.1, height * 0.58, 12), standardMaterial(0x6b4930));
+      trunk.name = "Trunk";
+      trunk.position.y = height * 0.29;
+      group.add(trunk);
+      const crownMaterial = standardMaterial(options.crownColor || 0x54724c);
+      const crownY = height * 0.72;
+      [[0,0,0,1],[-.42,.04,.12,.72],[.38,.08,-.12,.76],[.08,.24,.24,.68]].forEach(([x,y,z,scale], index) => {
+        const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(crownRadius * scale, 2), crownMaterial.clone());
+        crown.name = `Crown ${index + 1}`;
+        crown.position.set(x * crownRadius, crownY + y * height, z * crownRadius);
+        group.add(crown);
+      });
+      group.position.set(radius * 1.45, -radius * 0.6, 0);
+      object = group;
+    } else if (kind === "cloud") {
+      const puffs = Math.round(THREE.MathUtils.clamp(Number(options.puffs) || 10, 3, 40));
+      const cloudRadius = THREE.MathUtils.clamp(Number(options.radius) || radius * 1.2, 0.4, 20);
+      const seed = Number(options.seed) || 1;
+      const group = new THREE.Group();
+      for (let i = 0; i < puffs; i += 1) {
+        const t = i + seed * 0.37;
+        const puff = new THREE.Mesh(new THREE.IcosahedronGeometry(cloudRadius * (0.26 + (Math.sin(t * 1.7) + 1) * 0.08), 1), standardMaterial(0xe6eaee, { roughness: 1 }));
+        puff.name = `Cloud Puff ${i + 1}`;
+        puff.position.set(Math.sin(t * 2.13) * cloudRadius * 0.75, Math.abs(Math.cos(t * 1.41)) * cloudRadius * 0.3, Math.cos(t * 1.89) * cloudRadius * 0.42);
+        group.add(puff);
+      }
+      group.position.set(-radius * 1.4, radius * 1.8, 0);
+      object = group;
+    } else if (kind === "ivy") {
+      const turns = THREE.MathUtils.clamp(Number(options.turns) || 5, 1, 20);
+      const ivyRadius = THREE.MathUtils.clamp(Number(options.radius) || radius * 0.85, 0.1, 20);
+      const height = THREE.MathUtils.clamp(Number(options.height) || radius * 2.2, 0.4, 40);
+      const leaves = Math.round(THREE.MathUtils.clamp(Number(options.leaves) || 28, 4, 100));
+      const points = [];
+      for (let i = 0; i <= leaves; i += 1) {
+        const t = i / leaves;
+        const angle = t * Math.PI * 2 * turns;
+        points.push(new THREE.Vector3(Math.cos(angle) * ivyRadius, -radius * 0.45 + t * height, Math.sin(angle) * ivyRadius));
+      }
+      const curve = new THREE.CatmullRomCurve3(points);
+      const group = new THREE.Group();
+      const vine = new THREE.Mesh(new THREE.TubeGeometry(curve, leaves * 2, Math.max(ivyRadius * 0.025, 0.01), 6, false), standardMaterial(0x395a35));
+      vine.name = "Ivy Vine";
+      group.add(vine);
+      const leafGeometry = new THREE.SphereGeometry(Math.max(ivyRadius * 0.08, 0.025), 8, 5);
+      for (let i = 0; i < leaves; i += 2) {
+        const leaf = new THREE.Mesh(leafGeometry.clone(), standardMaterial(0x507b45));
+        leaf.name = `Ivy Leaf ${i / 2 + 1}`;
+        leaf.position.copy(points[i]);
+        leaf.scale.set(1.6, 0.45, 0.9);
+        group.add(leaf);
+      }
+      object = group;
+    } else if (kind === "metaRig") {
+      const height = THREE.MathUtils.clamp(Number(options.height) || radius * 2, 0.8, 20);
+      const group = new THREE.Group();
+      const hips = new THREE.Bone(); hips.name = "hips"; hips.position.y = height * 0.48;
+      const spine = new THREE.Bone(); spine.name = "spine"; spine.position.y = height * 0.18;
+      const chest = new THREE.Bone(); chest.name = "chest"; chest.position.y = height * 0.16;
+      const neck = new THREE.Bone(); neck.name = "neck"; neck.position.y = height * 0.13;
+      const head = new THREE.Bone(); head.name = "head"; head.position.y = height * 0.11;
+      hips.add(spine); spine.add(chest); chest.add(neck); neck.add(head);
+      const addLimb = (parent, name, x, y, childY) => {
+        const upper = new THREE.Bone(); upper.name = `${name}_upper`; upper.position.set(x, y, 0);
+        const lower = new THREE.Bone(); lower.name = `${name}_lower`; lower.position.set(0, childY, 0);
+        upper.add(lower); parent.add(upper);
+      };
+      addLimb(chest, "arm.L", height * 0.15, height * 0.07, -height * 0.18);
+      addLimb(chest, "arm.R", -height * 0.15, height * 0.07, -height * 0.18);
+      addLimb(hips, "leg.L", height * 0.09, 0, -height * 0.34);
+      addLimb(hips, "leg.R", -height * 0.09, 0, -height * 0.34);
+      group.add(hips);
+      const helper = new THREE.SkeletonHelper(hips);
+      helper.name = "Meta-Rig Display";
+      helper.material.depthTest = false;
+      helper.renderOrder = 10;
+      group.add(helper);
+      object = group;
+    } else {
+      const primitive = String(options.type || kind || "cube").toLowerCase();
+      const size = THREE.MathUtils.clamp(Number(options.size) || radius * 0.6, 0.05, 50);
+      let geometry;
+      if (primitive === "sphere") geometry = new THREE.SphereGeometry(size * 0.5, 32, 20);
+      else if (primitive === "cylinder") geometry = new THREE.CylinderGeometry(size * 0.35, size * 0.35, size, 24);
+      else if (primitive === "cone") geometry = new THREE.ConeGeometry(size * 0.45, size, 24);
+      else geometry = new THREE.BoxGeometry(size, size, size);
+      object = new THREE.Mesh(geometry, standardMaterial(options.color || 0x6d89a8));
+      object.position.set(radius * 1.25, 0, 0);
+    }
+
+    return addGeneratedObject(object, options);
+  };
+
+  const fractureObjects = (ids = [], rawOptions = {}) => {
+    const root = modelRef.current;
+    if (!root) return null;
+    const objects = (ids.length ? ids : selectedObjectsRef.current.map((item) => item.userData?.sceneId || item.uuid)).map((id) => findBySceneId(root, id)).filter(Boolean);
+    if (!objects.length) return null;
+    const box = new THREE.Box3();
+    objects.forEach((object) => box.expandByObject(object));
+    if (box.isEmpty()) return null;
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const pieces = Math.round(THREE.MathUtils.clamp(Number(rawOptions.pieces) || 12, 4, 64));
+    const spread = THREE.MathUtils.clamp(Number(rawOptions.spread) || 0.08, 0, 1);
+    const group = new THREE.Group();
+    group.position.copy(center);
+    const cols = Math.max(2, Math.ceil(Math.cbrt(pieces)));
+    const shardSize = new THREE.Vector3(size.x / cols, size.y / cols, size.z / cols);
+    for (let index = 0; index < pieces; index += 1) {
+      const x = index % cols;
+      const y = Math.floor(index / cols) % cols;
+      const z = Math.floor(index / (cols * cols));
+      const geometry = new THREE.BoxGeometry(Math.max(shardSize.x * 0.86, 0.01), Math.max(shardSize.y * 0.86, 0.01), Math.max(shardSize.z * 0.86, 0.01));
+      const material = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL((index * 0.07) % 1, 0.28, 0.52), roughness: 0.72, transparent: true, opacity: 0.78 });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.name = `Fracture Piece ${index + 1}`;
+      mesh.position.set((x - (cols - 1) / 2) * shardSize.x, (y - (cols - 1) / 2) * shardSize.y, (z - (cols - 1) / 2) * shardSize.z);
+      mesh.position.multiplyScalar(1 + spread);
+      group.add(mesh);
+    }
+    return addGeneratedObject(group, { name: `Fracture Preview (${pieces})` });
+  };
+
+  const analyzeFor3DPrint = (ids = []) => {
+    const root = modelRef.current;
+    if (!root) return { ok: false, message: "No model is loaded." };
+    const objects = (ids.length ? ids.map((id) => findBySceneId(root, id)) : selectedObjectsRef.current).filter(Boolean);
+    const targets = objects.length ? objects : [root];
+    const box = new THREE.Box3();
+    let triangles = 0;
+    let vertices = 0;
+    let openEdges = 0;
+    let analyzedEdges = 0;
+    let skippedTopology = false;
+    const seenGeometries = new Set();
+
+    targets.forEach((target) => {
+      box.expandByObject(target);
+      target.traverse?.((node) => {
+        if (!node.isMesh || !node.geometry || seenGeometries.has(node.geometry)) return;
+        seenGeometries.add(node.geometry);
+        const geometry = node.geometry;
+        const position = geometry.attributes?.position;
+        if (!position) return;
+        vertices += position.count;
+        const triCount = geometry.index ? Math.floor(geometry.index.count / 3) : Math.floor(position.count / 3);
+        triangles += triCount;
+        if (triCount > 180000) { skippedTopology = true; return; }
+        const edges = new Map();
+        const vertexKey = (index) => {
+          if (geometry.index) return String(index);
+          const x = Math.round(position.getX(index) * 100000);
+          const y = Math.round(position.getY(index) * 100000);
+          const z = Math.round(position.getZ(index) * 100000);
+          return `${x},${y},${z}`;
+        };
+        const addEdge = (a, b) => {
+          const ka = vertexKey(a); const kb = vertexKey(b);
+          const key = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+          edges.set(key, (edges.get(key) || 0) + 1);
+        };
+        const indexArray = geometry.index?.array;
+        for (let tri = 0; tri < triCount; tri += 1) {
+          const a = indexArray ? indexArray[tri * 3] : tri * 3;
+          const b = indexArray ? indexArray[tri * 3 + 1] : tri * 3 + 1;
+          const c = indexArray ? indexArray[tri * 3 + 2] : tri * 3 + 2;
+          addEdge(a, b); addEdge(b, c); addEdge(c, a);
+        }
+        analyzedEdges += edges.size;
+        for (const count of edges.values()) if (count === 1) openEdges += 1;
+      });
+    });
+
+    const dimensions = box.isEmpty() ? new THREE.Vector3() : box.getSize(new THREE.Vector3());
+    return {
+      ok: true,
+      objects: targets.length,
+      meshes: seenGeometries.size,
+      triangles,
+      vertices,
+      dimensions: { x: dimensions.x, y: dimensions.y, z: dimensions.z },
+      openEdges: skippedTopology ? null : openEdges,
+      analyzedEdges,
+      topologySkipped: skippedTopology,
+      watertight: skippedTopology ? null : openEdges === 0,
+    };
+  };
+
   useImperativeHandle(forwardedRef, () => ({
     async captureScreenshot(options = {}) {
       const renderer = rendererRef.current;
@@ -1158,23 +1400,41 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
       const camera = getActiveCamera();
       const host = hostRef.current;
       if (!renderer || !scene || !camera || !host) throw new Error("3D viewport is not ready.");
+
       const format = ["image/jpeg", "image/webp", "image/png"].includes(options.mimeType) ? options.mimeType : "image/png";
       const quality = Number.isFinite(options.quality) ? options.quality : 0.94;
       const currentSize = new THREE.Vector2();
       renderer.getSize(currentSize);
-      const captureScale = Math.max(0.25, Math.min(4, Number(options.scale) || 1));
-      const width = Math.max(64, Math.min(8192, Math.round(options.width || currentSize.x * captureScale)));
-      const height = Math.max(64, Math.min(8192, Math.round(options.height || currentSize.y * captureScale)));
+
+      const finalScale = Math.max(0.25, Math.min(4, Number(options.scale) || 1));
+      const finalWidth = Math.max(64, Math.min(8192, Math.round(options.width || currentSize.x * finalScale)));
+      const finalHeight = Math.max(64, Math.min(8192, Math.round(options.height || currentSize.y * finalScale)));
+      const requestedSupersampling = Math.max(1, Math.min(4, Number(options.supersampling) || 1));
+      const maxTexture = Math.max(2048, Number(renderer.capabilities?.maxTextureSize) || 8192);
+      const maxSampleScale = Math.max(1, Math.min(requestedSupersampling, maxTexture / finalWidth, maxTexture / finalHeight));
+      const renderWidth = Math.max(64, Math.min(maxTexture, Math.round(finalWidth * maxSampleScale)));
+      const renderHeight = Math.max(64, Math.min(maxTexture, Math.round(finalHeight * maxSampleScale)));
+
       const oldBackground = scene.background;
       const oldAlpha = renderer.getClearAlpha();
       const oldTarget = renderer.getRenderTarget();
+      const oldToneMapping = renderer.toneMapping;
+      const oldExposure = renderer.toneMappingExposure;
+      const oldShadowType = renderer.shadowMap.type;
+      const oldShadowEnabled = renderer.shadowMap.enabled;
+      const ground = groundRef.current;
+      const oldGroundReceiveShadow = ground?.receiveShadow;
+      const keyLight = lightsRef.current?.key;
+      const oldKeyCastShadow = keyLight?.castShadow;
+      const oldShadowMapSize = keyLight?.shadow?.mapSize ? { x: keyLight.shadow.mapSize.x, y: keyLight.shadow.mapSize.y } : null;
       const helpers = selectionHelperRef.current || [];
       const helperVisibility = helpers.map((helper) => helper.visible);
       helpers.forEach((helper) => { helper.visible = false; });
+
       const oldProjection = camera.isPerspectiveCamera
         ? { aspect: camera.aspect }
         : { left: camera.left, right: camera.right, top: camera.top, bottom: camera.bottom };
-      const captureAspect = width / Math.max(height, 1);
+      const captureAspect = finalWidth / Math.max(finalHeight, 1);
       if (camera.isPerspectiveCamera) camera.aspect = captureAspect;
       else if (camera.isOrthographicCamera) {
         const halfHeight = Math.max((camera.top - camera.bottom) * 0.5, 0.001);
@@ -1183,47 +1443,199 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
       }
       camera.updateProjectionMatrix();
 
-      const renderTarget = new THREE.WebGLRenderTarget(width, height, {
+      const toneMappings = {
+        none: THREE.NoToneMapping,
+        linear: THREE.LinearToneMapping,
+        reinhard: THREE.ReinhardToneMapping,
+        cineon: THREE.CineonToneMapping,
+        aces: THREE.ACESFilmicToneMapping,
+        neutral: THREE.NeutralToneMapping ?? THREE.ACESFilmicToneMapping,
+      };
+      renderer.toneMapping = toneMappings[String(options.toneMapping || "aces").toLowerCase()] ?? THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = Math.max(0.05, Math.min(8, Number(options.exposure) || 1));
+
+      const shadowQuality = String(options.shadowQuality || "high").toLowerCase();
+      renderer.shadowMap.enabled = options.shadows !== false;
+      renderer.shadowMap.type = shadowQuality === "draft"
+        ? THREE.BasicShadowMap
+        : shadowQuality === "medium"
+          ? THREE.PCFShadowMap
+          : THREE.PCFSoftShadowMap;
+      const shadowSize = shadowQuality === "ultra" ? 4096 : shadowQuality === "high" ? 2048 : shadowQuality === "medium" ? 1024 : 512;
+      if (keyLight?.shadow?.mapSize) {
+        keyLight.shadow.mapSize.set(shadowSize, shadowSize);
+        keyLight.shadow.map?.dispose?.();
+        keyLight.shadow.map = null;
+      }
+      if (keyLight) keyLight.castShadow = options.shadows !== false;
+      if (ground) ground.receiveShadow = options.contactShadows !== false && options.shadows !== false;
+
+      const forceTransparentScene = Boolean(options.transparent || options.backgroundImageFile);
+      if (forceTransparentScene) {
+        scene.background = null;
+        renderer.setClearAlpha(0);
+      } else if (options.backgroundHdri && environmentTextureRef.current) {
+        scene.background = environmentTextureRef.current;
+        renderer.setClearAlpha(1);
+      } else if (options.backgroundColor) {
+        try { scene.background = new THREE.Color(options.backgroundColor); } catch { /* keep studio background */ }
+        renderer.setClearAlpha(1);
+      }
+
+      const renderTarget = new THREE.WebGLRenderTarget(renderWidth, renderHeight, {
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType,
         depthBuffer: true,
         stencilBuffer: false,
       });
       renderTarget.texture.colorSpace = THREE.SRGBColorSpace;
+      if (renderer.capabilities?.isWebGL2 && options.antiAlias !== false) {
+        renderTarget.samples = Math.min(4, Number(renderer.capabilities?.maxSamples) || 4);
+      }
 
+      let composer = null;
+      let postProcessed = false;
+      const postPasses = [];
       try {
-        if (options.transparent) {
-          scene.background = null;
-          renderer.setClearAlpha(0);
+        let readTarget = renderTarget;
+        if ((options.ambientOcclusion || options.bloom) && !forceTransparentScene) {
+          try {
+            const [{ EffectComposer }, { RenderPass }, { SSAOPass }, { UnrealBloomPass }] = await Promise.all([
+              import("three/addons/postprocessing/EffectComposer.js"),
+              import("three/addons/postprocessing/RenderPass.js"),
+              import("three/addons/postprocessing/SSAOPass.js"),
+              import("three/addons/postprocessing/UnrealBloomPass.js"),
+            ]);
+            composer = new EffectComposer(renderer, renderTarget);
+            composer.renderToScreen = false;
+            composer.setPixelRatio(1);
+            composer.setSize(renderWidth, renderHeight);
+            const renderPass = new RenderPass(scene, camera);
+            composer.addPass(renderPass);
+            postPasses.push(renderPass);
+            if (options.ambientOcclusion) {
+              const aoStrength = Math.max(0.05, Math.min(1, Number(options.ambientOcclusionStrength) || 0.35));
+              const ssaoPass = new SSAOPass(scene, camera, renderWidth, renderHeight);
+              ssaoPass.kernelRadius = Math.max(2, Math.round(6 + aoStrength * 22));
+              ssaoPass.minDistance = 0.0025;
+              ssaoPass.maxDistance = 0.12 + aoStrength * 0.2;
+              composer.addPass(ssaoPass);
+              postPasses.push(ssaoPass);
+            }
+            if (options.bloom && !postProcessed) {
+              const bloomStrength = Math.max(0.05, Math.min(1.5, Number(options.bloomStrength) || 0.35));
+              const bloomPass = new UnrealBloomPass(new THREE.Vector2(renderWidth, renderHeight), bloomStrength, 0.35, 0.88);
+              composer.addPass(bloomPass);
+              postPasses.push(bloomPass);
+            }
+            if (renderer.capabilities?.isWebGL2 && options.antiAlias !== false) {
+              const samples = Math.min(4, Number(renderer.capabilities?.maxSamples) || 4);
+              if (composer.renderTarget1) composer.renderTarget1.samples = samples;
+              if (composer.renderTarget2) composer.renderTarget2.samples = samples;
+            }
+            composer.render();
+            readTarget = composer.readBuffer;
+            postProcessed = true;
+          } catch {
+            renderer.setRenderTarget(renderTarget);
+            renderer.clear(true, true, true);
+            renderer.render(scene, camera);
+            readTarget = renderTarget;
+          }
+        } else {
+          renderer.setRenderTarget(renderTarget);
+          renderer.clear(true, true, true);
+          renderer.render(scene, camera);
         }
-        renderer.setRenderTarget(renderTarget);
-        renderer.clear(true, true, true);
-        renderer.render(scene, camera);
-        const pixels = new Uint8Array(width * height * 4);
-        renderer.readRenderTargetPixels(renderTarget, 0, 0, width, height, pixels);
+        const pixels = new Uint8Array(renderWidth * renderHeight * 4);
+        renderer.readRenderTargetPixels(readTarget, 0, 0, renderWidth, renderHeight, pixels);
 
-        // WebGL pixels are bottom-up; flip rows before encoding.
-        const rowBytes = width * 4;
+        const rowBytes = renderWidth * 4;
         const flipped = new Uint8ClampedArray(pixels.length);
-        for (let y = 0; y < height; y += 1) {
-          const sourceOffset = (height - 1 - y) * rowBytes;
+        for (let y = 0; y < renderHeight; y += 1) {
+          const sourceOffset = (renderHeight - 1 - y) * rowBytes;
           flipped.set(pixels.subarray(sourceOffset, sourceOffset + rowBytes), y * rowBytes);
         }
+
+        const sourceCanvas = document.createElement("canvas");
+        sourceCanvas.width = renderWidth;
+        sourceCanvas.height = renderHeight;
+        const sourceContext = sourceCanvas.getContext("2d", { alpha: true });
+        if (!sourceContext) throw new Error("2D export canvas is unavailable.");
+        sourceContext.putImageData(new ImageData(flipped, renderWidth, renderHeight), 0, 0);
+
         const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
+        canvas.width = finalWidth;
+        canvas.height = finalHeight;
         const context = canvas.getContext("2d", { alpha: true });
         if (!context) throw new Error("2D export canvas is unavailable.");
-        context.putImageData(new ImageData(flipped, width, height), 0, 0);
+
+        if (options.backgroundImageFile) {
+          try {
+            const bitmap = await createImageBitmap(options.backgroundImageFile);
+            const imageRatio = bitmap.width / Math.max(bitmap.height, 1);
+            const canvasRatio = finalWidth / Math.max(finalHeight, 1);
+            let drawWidth = finalWidth;
+            let drawHeight = finalHeight;
+            let drawX = 0;
+            let drawY = 0;
+            if (imageRatio > canvasRatio) {
+              drawHeight = finalHeight;
+              drawWidth = finalHeight * imageRatio;
+              drawX = (finalWidth - drawWidth) * 0.5;
+            } else {
+              drawWidth = finalWidth;
+              drawHeight = finalWidth / imageRatio;
+              drawY = (finalHeight - drawHeight) * 0.5;
+            }
+            context.drawImage(bitmap, drawX, drawY, drawWidth, drawHeight);
+            bitmap.close?.();
+          } catch {
+            context.fillStyle = options.backgroundColor || "#202124";
+            context.fillRect(0, 0, finalWidth, finalHeight);
+          }
+        } else if (!options.transparent && options.backgroundColor) {
+          context.fillStyle = options.backgroundColor;
+          context.fillRect(0, 0, finalWidth, finalHeight);
+        }
+
+        const aoStrength = options.ambientOcclusion && !postProcessed ? Math.max(0, Math.min(1, Number(options.ambientOcclusionStrength) || 0.35)) : 0;
+        if (aoStrength > 0) context.filter = `contrast(${1 + aoStrength * 0.12}) brightness(${1 - aoStrength * 0.025})`;
+        context.drawImage(sourceCanvas, 0, 0, finalWidth, finalHeight);
+        context.filter = "none";
+
+        if (options.bloom) {
+          const bloomStrength = Math.max(0.05, Math.min(1.5, Number(options.bloomStrength) || 0.35));
+          context.save();
+          context.globalCompositeOperation = "screen";
+          context.globalAlpha = Math.min(0.5, 0.12 + bloomStrength * 0.22);
+          context.filter = `blur(${Math.max(2, Math.round(Math.min(finalWidth, finalHeight) * 0.006))}px) brightness(${1.1 + bloomStrength * 0.4})`;
+          context.drawImage(sourceCanvas, 0, 0, finalWidth, finalHeight);
+          context.restore();
+        }
+
         const blob = await new Promise((resolve, reject) => {
           canvas.toBlob((result) => result ? resolve(result) : reject(new Error("Could not encode the viewport image.")), format, quality);
         });
         return blob;
       } finally {
+        postPasses.forEach((pass) => { try { pass.dispose?.(); } catch {} });
+        try { composer?.dispose?.(); } catch {}
         renderer.setRenderTarget(oldTarget);
         renderTarget.dispose();
         scene.background = oldBackground;
         renderer.setClearAlpha(oldAlpha);
+        renderer.toneMapping = oldToneMapping;
+        renderer.toneMappingExposure = oldExposure;
+        renderer.shadowMap.type = oldShadowType;
+        renderer.shadowMap.enabled = oldShadowEnabled;
+        if (ground && oldGroundReceiveShadow != null) ground.receiveShadow = oldGroundReceiveShadow;
+        if (keyLight && oldKeyCastShadow != null) keyLight.castShadow = oldKeyCastShadow;
+        if (keyLight?.shadow?.mapSize && oldShadowMapSize) {
+          keyLight.shadow.mapSize.set(oldShadowMapSize.x, oldShadowMapSize.y);
+          keyLight.shadow.map?.dispose?.();
+          keyLight.shadow.map = null;
+        }
         if (camera.isPerspectiveCamera) camera.aspect = oldProjection.aspect;
         else if (camera.isOrthographicCamera) {
           camera.left = oldProjection.left;
@@ -1483,6 +1895,43 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
       if (changed) refreshGpuEstimate();
       emitMaterialInfo();
       return changed;
+    },
+    setObjectTransform(id, patch = {}) {
+      const object = findBySceneId(modelRef.current, id);
+      if (!object || object.userData?.locked) return false;
+      if (patch.position && typeof patch.position === "object") {
+        object.position.set(
+          Number.isFinite(Number(patch.position.x)) ? Number(patch.position.x) : object.position.x,
+          Number.isFinite(Number(patch.position.y)) ? Number(patch.position.y) : object.position.y,
+          Number.isFinite(Number(patch.position.z)) ? Number(patch.position.z) : object.position.z,
+        );
+      }
+      const rotation = patch.rotationDegrees || patch.rotation;
+      if (rotation && typeof rotation === "object") {
+        const useDegrees = Boolean(patch.rotationDegrees);
+        const convert = (value, fallback) => Number.isFinite(Number(value)) ? (useDegrees ? THREE.MathUtils.degToRad(Number(value)) : Number(value)) : fallback;
+        object.rotation.set(convert(rotation.x, object.rotation.x), convert(rotation.y, object.rotation.y), convert(rotation.z, object.rotation.z));
+      }
+      if (patch.scale && typeof patch.scale === "object") {
+        object.scale.set(
+          Number.isFinite(Number(patch.scale.x)) ? Math.max(0.0001, Number(patch.scale.x)) : object.scale.x,
+          Number.isFinite(Number(patch.scale.y)) ? Math.max(0.0001, Number(patch.scale.y)) : object.scale.y,
+          Number.isFinite(Number(patch.scale.z)) ? Math.max(0.0001, Number(patch.scale.z)) : object.scale.z,
+        );
+      }
+      object.updateMatrixWorld(true);
+      refreshSelectionHelpers();
+      emitSceneGraph();
+      return true;
+    },
+    createGeneratedObject(kind, options = {}) {
+      return createGeneratedObject(kind, options);
+    },
+    fractureObjects(ids = [], options = {}) {
+      return fractureObjects(ids, options);
+    },
+    analyzeFor3DPrint(ids = []) {
+      return analyzeFor3DPrint(ids);
     },
     retryLoad() { setReloadToken((value) => value + 1); },
     cancelLoad() { activeLoadRef.current?.cancel?.(); },

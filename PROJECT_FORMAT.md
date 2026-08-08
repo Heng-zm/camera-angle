@@ -1,11 +1,11 @@
-# `.multiview` Project Format — V8.9
+# `.multiview` Project Format — V8.18
 
 `.multiview` is a UTF-8 JSON document.
 
 ```json
 {
   "format": "multiview-camera-studio",
-  "version": "8.9"
+  "version": "8.18"
 }
 ```
 
@@ -69,3 +69,8 @@ This keeps project files small even when a 3D bundle is hundreds of megabytes.
 ## Compatibility
 
 Importers should check `format` first and then use `version` for optional migrations. Unknown future fields should be ignored rather than treated as an error.
+
+
+## V8.18 notes
+
+Render queue jobs are intentionally transient and are not stored in `.multiview`. Camera presets, lighting, project configuration, prompts, and export settings remain project data. Extension installation/settings are application-level local preferences and are not embedded into a project.

@@ -3,7 +3,7 @@ setlocal
 cd /d "%~dp0"
 
 echo ========================================
-echo MultiView Camera Studio V8.9 Production
+echo MultiView Camera Studio V8.18 Render + Extensions
 echo Worker Import · Outliner · Materials · Lighting · Export
 echo Browser-only
 

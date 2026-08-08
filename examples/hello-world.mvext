@@ -1,0 +1,35 @@
+{
+  "format": "multiview-extension",
+  "formatVersion": 2,
+  "manifest": {
+    "id": "example.hello-world",
+    "name": "Hello World V2",
+    "version": "2.0.0",
+    "author": "MultiView Example",
+    "category": "Examples",
+    "description": "Small V2 extension demonstrating settings, a toolbar button, inspector panel, and shortcut.",
+    "permissions": ["camera:write"],
+    "dependencies": [],
+    "settings": [
+      { "id": "lens", "label": "Lens", "type": "select", "default": "85mm", "options": ["50mm", "85mm", "105mm"] }
+    ]
+  },
+  "actions": [
+    {
+      "id": "hello-camera",
+      "label": "Hello Camera",
+      "description": "Applies a simple camera using the extension setting.",
+      "script": "const lens = studio.settings.get('lens', '85mm'); studio.camera.set({ azimuth: 35, elevation: 18, distance: 38, lens }); studio.log('Hello from V2', lens);"
+    }
+  ],
+  "contributions": {
+    "toolbar": [{ "id": "hello-toolbar", "label": "Hello Camera", "actionId": "hello-camera" }],
+    "inspectorPanels": [{ "id": "hello-panel", "title": "Hello World", "actionIds": ["hello-camera"] }],
+    "outlinerMenu": [],
+    "importers": [],
+    "exporters": [],
+    "generators": [],
+    "renderHooks": [],
+    "shortcuts": [{ "id": "hello-shortcut", "label": "Hello Camera", "combo": "Alt+Shift+J", "actionId": "hello-camera" }]
+  }
+}

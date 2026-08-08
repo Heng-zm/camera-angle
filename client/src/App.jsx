@@ -20,6 +20,7 @@ import {
   Lock,
   Orbit,
   Palette,
+  Puzzle,
   Rotate3d,
   RotateCcw,
   Save,
@@ -31,8 +32,11 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { BUILTIN_EXTENSIONS } from "./extensions/builtinExtensions.js";
 import ViewportErrorBoundary from "./ViewportErrorBoundary.jsx";
 const ThreeModelViewport = lazy(() => import("./ThreeModelViewport.jsx"));
+const ScriptingStudio = lazy(() => import("./ScriptingStudio.jsx"));
+const RenderStudio = lazy(() => import("./RenderStudio.jsx"));
 
 const ANGLES = [
   { key: "front", label: "Front", deg: "0°", hint: "Straight" },
@@ -522,6 +526,44 @@ function countSceneNodes(node) {
   return 1 + (node.children || []).reduce((sum, child) => sum + countSceneNodes(child), 0);
 }
 
+
+function safeParseExtensionStorage(value, fallback) {
+  try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function loadHostExtensions() {
+  const enabledStored = localStorage.getItem("multiview-v8.18-enabled-extensions") || localStorage.getItem("multiview-v8.10-enabled-extensions");
+  const enabledValues = enabledStored ? safeParseExtensionStorage(enabledStored, []) : BUILTIN_EXTENSIONS.filter((item) => item.enabledByDefault).map((item) => item.id);
+  const enabled = new Set(Array.isArray(enabledValues) ? enabledValues : []);
+  const customPackages = safeParseExtensionStorage(localStorage.getItem("multiview-v8.18-custom-extensions") || "[]", []);
+  const custom = Array.isArray(customPackages) ? customPackages.map((pkg) => ({
+    id: pkg?.manifest?.id,
+    name: pkg?.manifest?.name,
+    version: pkg?.manifest?.version,
+    permissions: pkg?.manifest?.permissions || [],
+    actions: pkg?.actions || [],
+    contributions: pkg?.contributions || {},
+  })).filter((item) => item.id) : [];
+  const all = [...BUILTIN_EXTENSIONS, ...custom];
+  return all.filter((extension) => enabled.has(extension.id));
+}
+
+function extensionActionSource(extension, contribution) {
+  const action = extension?.actions?.find((item) => item.id === contribution?.actionId);
+  return contribution?.script || action?.script || "";
+}
+
+function extensionComboMatches(event, combo = "") {
+  if (!combo) return false;
+  const parts = combo.toLowerCase().split("+").map((part) => part.trim()).filter(Boolean);
+  const key = parts.pop();
+  const alt = parts.includes("alt");
+  const shift = parts.includes("shift");
+  const ctrl = parts.includes("ctrl") || parts.includes("control");
+  const meta = parts.includes("meta") || parts.includes("cmd") || parts.includes("command");
+  return Boolean(event.altKey) === alt && Boolean(event.shiftKey) === shift && Boolean(event.ctrlKey) === ctrl && Boolean(event.metaKey) === meta && String(event.key || "").toLowerCase() === key;
+}
+
 function App() {
   const inputRef = useRef(null);
   const projectFileInputRef = useRef(null);
@@ -608,6 +650,8 @@ function App() {
   const [orbitAutoSpeed, setOrbitAutoSpeed] = useState(24);
   const [orbiting, setOrbiting] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState("camera");
+  const [extensionRevision, setExtensionRevision] = useState(0);
+  const [outlinerContextMenu, setOutlinerContextMenu] = useState(null);
 
   const cameraSummary = useMemo(() => describeCamera(camera), [camera]);
   const nearestPreset = useMemo(() => nearestPresetFromCamera(camera), [camera]);
@@ -616,6 +660,53 @@ function App() {
   const sceneNodeCount = useMemo(() => countSceneNodes(sceneGraph), [sceneGraph]);
   const filteredSceneNodeCount = useMemo(() => countSceneNodes(filteredSceneGraph), [filteredSceneGraph]);
   const activeMaterial = useMemo(() => materialInfo.materials.find((item) => item.id === activeMaterialId) || materialInfo.materials[0] || null, [materialInfo, activeMaterialId]);
+  const studioSnapshot = useMemo(() => ({
+    version: "8.18",
+    project: { name: projectName, savedAt: lastSavedAt || null },
+    asset: { type: assetType, name: file?.name || "", format: assetType === "model" ? extensionFromName(file?.name || "") : "image" },
+    camera: { ...camera, lens: lensPreset, focus: focusPoint, focusPosition: { ...focusPosition }, projection: assetType === "model" ? viewportProjection : "perspective" },
+    scene: { graph: sceneNodeCount <= 5000 ? sceneGraph : null, graphTruncated: sceneNodeCount > 5000, selectedIds: [...selectedSceneIds].slice(0, 5000), nodeCount: sceneNodeCount },
+    materials: { activeId: activeMaterialId, count: materialInfo.materials.length },
+    lighting: { ...lightingConfig },
+    viewport: { shading: viewportShading, grid: viewportGrid, ground: viewportGround, quality: qualityMode },
+    performance: { ...performanceInfo },
+  }), [projectName, lastSavedAt, assetType, file, camera, lensPreset, focusPoint, focusPosition, viewportProjection, sceneGraph, selectedSceneIds, sceneNodeCount, activeMaterialId, materialInfo.materials.length, lightingConfig, viewportShading, viewportGrid, viewportGround, qualityMode, performanceInfo]);
+
+  const hostExtensions = useMemo(() => loadHostExtensions(), [extensionRevision]);
+  const hostToolbarContributions = useMemo(() => hostExtensions.flatMap((extension) => (extension.contributions?.toolbar || []).map((item) => ({ ...item, extension }))).slice(0, 8), [hostExtensions]);
+  const hostInspectorContributions = useMemo(() => hostExtensions.flatMap((extension) => (extension.contributions?.inspectorPanels || []).map((item) => ({ ...item, extension }))).slice(0, 20), [hostExtensions]);
+  const hostOutlinerContributions = useMemo(() => hostExtensions.flatMap((extension) => (extension.contributions?.outlinerMenu || []).map((item) => ({ ...item, extension }))).slice(0, 20), [hostExtensions]);
+  const hostExporterContributions = useMemo(() => hostExtensions.flatMap((extension) => (extension.contributions?.exporters || []).map((item) => ({ ...item, extension }))).slice(0, 20), [hostExtensions]);
+
+  useEffect(() => {
+    const refresh = () => setExtensionRevision((value) => value + 1);
+    window.addEventListener("multiview:extensions-changed", refresh);
+    return () => window.removeEventListener("multiview:extensions-changed", refresh);
+  }, []);
+
+  useEffect(() => {
+    const closeMenu = () => setOutlinerContextMenu(null);
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("blur", closeMenu);
+    return () => { window.removeEventListener("pointerdown", closeMenu); window.removeEventListener("blur", closeMenu); };
+  }, []);
+
+  useEffect(() => {
+    const shortcuts = hostExtensions.flatMap((extension) => (extension.contributions?.shortcuts || []).map((item) => ({ ...item, extension })));
+    if (!shortcuts.length) return undefined;
+    const handleShortcut = (event) => {
+      const tag = String(event.target?.tagName || "").toLowerCase();
+      if (["input", "textarea", "select"].includes(tag) || event.target?.isContentEditable) return;
+      const contribution = shortcuts.find((item) => extensionComboMatches(event, item.combo));
+      if (!contribution) return;
+      const source = extensionActionSource(contribution.extension, contribution);
+      if (!source) return;
+      event.preventDefault();
+      runHostExtensionSource(source, contribution.extension, `${contribution.extension.name} › ${contribution.label || "Shortcut"}`);
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [hostExtensions, studioSnapshot]);
 
   useEffect(() => {
     return () => {
@@ -1509,7 +1600,7 @@ function App() {
     }));
     return {
       format: "multiview-camera-studio",
-      version: "8.9",
+      version: "8.18",
       projectName: safeProjectName(projectName),
       savedAt: new Date().toISOString(),
       asset: {
@@ -1674,7 +1765,7 @@ function App() {
     });
     const payload = {
       format: "multiview-camera-json",
-      version: "8.9",
+      version: "8.18",
       projectName: safeProjectName(projectName),
       exportedAt: new Date().toISOString(),
       targetCamera: targetSpec,
@@ -1734,7 +1825,7 @@ function App() {
   function exportSceneJson() {
     downloadJson({
       format: "multiview-scene-json",
-      version: "8.9",
+      version: "8.18",
       projectName: safeProjectName(projectName),
       exportedAt: new Date().toISOString(),
       scene: threeViewportRef.current?.getSceneSnapshot?.() || sceneGraph,
@@ -1747,7 +1838,7 @@ function App() {
   function exportTransformJson() {
     downloadJson({
       format: "multiview-transform-json",
-      version: "8.9",
+      version: "8.18",
       projectName: safeProjectName(projectName),
       exportedAt: new Date().toISOString(),
       modelTransform: normalizeProjectTransform(modelTransform),
@@ -1778,6 +1869,174 @@ function App() {
     const url = URL.createObjectURL(blob);
     triggerDownload(url, projectFileName(projectName, "prompt.txt"));
     window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  function exportUnrealCameraJson() {
+    const targetSpec = getTargetCameraSpec({
+      targetKey: angleMode === "3d" ? "custom3d" : (selected[0] || "front45"),
+      camera,
+      cameraSummary,
+      lensPreset,
+      focusPoint,
+      focusPosition,
+      size,
+      projectionMode: assetType === "model" ? viewportProjection : "perspective",
+    });
+    downloadJson({
+      format: "multiview-unreal-camera-json",
+      version: "8.18",
+      projectName: safeProjectName(projectName),
+      exportedAt: new Date().toISOString(),
+      cameraActor: {
+        rotation: { pitch: Number(targetSpec.elevation) || 0, yaw: Number(targetSpec.azimuth) || 0, roll: 0 },
+        focalLengthMm: Number.parseFloat(String(targetSpec.lens)) || 50,
+        projectionMode: String(targetSpec.projection || "Perspective"),
+        distancePercent: camera.distance,
+        focusTarget: targetSpec.focus,
+        framing: targetSpec.framing,
+      },
+      note: "Camera orientation is exported as a pipeline handoff. Scene-world translation depends on the target engine scene scale/origin.",
+    }, "unreal-camera.json");
+  }
+
+  async function runHostExtensionSource(source, extension, label = "Extension") {
+    if (!String(source || "").trim()) return;
+    const worker = new Worker(new URL("./scriptRuntime.worker.js", import.meta.url), { type: "module" });
+    const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    await new Promise((resolve) => {
+      const timer = window.setTimeout(() => { worker.terminate(); resolve(); }, 12000);
+      const finish = () => { window.clearTimeout(timer); worker.terminate(); resolve(); };
+      worker.onerror = () => { setError(`${label} failed in the extension worker.`); finish(); };
+      worker.onmessage = async (event) => {
+        const data = event.data || {};
+        if (data.id !== runId) return;
+        try {
+          if (data.commands?.length) await executeStudioCommands(data.commands);
+          if (data.type === "error") setError(`${label}: ${data.error?.message || "extension script failed"}`);
+        } catch (error) {
+          setError(`${label}: ${error?.message || error}`);
+        }
+        finish();
+      };
+      const extensionSettings = safeParseExtensionStorage(localStorage.getItem("multiview-v8.18-extension-settings") || "{}", {});
+      worker.postMessage({ id: runId, source, snapshot: { ...studioSnapshot, extension: { id: extension?.id || null, settings: extensionSettings?.[extension?.id] || {} } }, permissions: extension?.permissions || [] });
+    });
+  }
+
+  function runHostContribution(contribution) {
+    const source = extensionActionSource(contribution.extension, contribution);
+    if (!source) return;
+    runHostExtensionSource(source, contribution.extension, `${contribution.extension.name} › ${contribution.label || contribution.title || contribution.id}`);
+  }
+
+  async function executeStudioCommands(commands = []) {
+    const output = [];
+    const viewport = threeViewportRef.current;
+    const requireModel = (label) => {
+      if (assetType !== "model" || modelLoadState.status !== "ready" || !viewport) {
+        output.push({ level: "warn", text: `${label} requires a loaded, ready 3D model.` });
+        return false;
+      }
+      return true;
+    };
+
+    for (const command of Array.isArray(commands) ? commands.slice(0, 500) : []) {
+      const type = String(command?.type || "");
+      const payload = command?.payload && typeof command.payload === "object" ? command.payload : {};
+      try {
+        if (type === "camera.set") {
+          takeManualCameraControl();
+          setAngleMode("3d");
+          setCamera((current) => ({
+            azimuth: payload.azimuth == null ? current.azimuth : normalizeAzimuth(Number(payload.azimuth) || 0),
+            elevation: payload.elevation == null ? current.elevation : clamp(Number(payload.elevation) || 0, -60, 85),
+            distance: payload.distance == null ? current.distance : clamp(Number(payload.distance) || 0, 0, 100),
+          }));
+          if (payload.lens && LENS_PRESETS.some((item) => item.key === payload.lens)) setLensPreset(payload.lens);
+          if (payload.focus && FOCUS_POINTS.some((item) => item.key === payload.focus)) setFocusPreset(payload.focus);
+          output.push({ level: "success", text: "Camera updated from script." });
+        } else if (type === "camera.reset") {
+          resetCameraControl();
+          output.push({ level: "success", text: "Camera reset." });
+        } else if (type === "scene.select" && requireModel("Scene selection")) {
+          const result = viewport.selectObjects?.(payload.ids || [], Boolean(payload.additive)) || [];
+          output.push({ level: "info", text: `Selected ${result.length} object(s).` });
+        } else if (type === "scene.frame" && requireModel("Frame selection")) {
+          const ok = viewport.frameSelection?.(payload.ids || []);
+          output.push({ level: ok ? "success" : "warn", text: ok ? "Framed selection in viewport." : "Nothing could be framed." });
+        } else if (type === "scene.visibility" && requireModel("Visibility command")) {
+          let changed = 0;
+          for (const id of payload.ids || []) if (viewport.setObjectVisibility?.(id, Boolean(payload.visible))) changed += 1;
+          output.push({ level: "info", text: `${payload.visible ? "Shown" : "Hidden"} ${changed} object(s).` });
+        } else if (type === "scene.showAll" && requireModel("Show all")) {
+          viewport.showAllObjects?.();
+          output.push({ level: "success", text: "All model meshes are visible." });
+        } else if (type === "scene.isolate" && requireModel("Isolate")) {
+          viewport.isolateObjects?.(payload.ids || []);
+          output.push({ level: "success", text: `Isolated ${(payload.ids || []).length} object(s).` });
+        } else if (type === "scene.duplicate" && requireModel("Duplicate")) {
+          const created = viewport.duplicateObjects?.(payload.ids || []) || [];
+          output.push({ level: "success", text: `Duplicated ${created.length} object(s).` });
+        } else if (type === "scene.delete" && requireModel("Delete")) {
+          viewport.deleteObjects?.(payload.ids || []);
+          output.push({ level: "success", text: `Deleted ${(payload.ids || []).length} object(s).` });
+        } else if (type === "scene.rename" && requireModel("Rename")) {
+          const ok = viewport.renameObject?.(payload.id, payload.name);
+          output.push({ level: ok ? "success" : "warn", text: ok ? `Renamed object to “${payload.name}”.` : "Object rename failed." });
+        } else if (type === "scene.transform" && requireModel("Object transform")) {
+          const ok = viewport.setObjectTransform?.(payload.id, payload.patch || {});
+          output.push({ level: ok ? "success" : "warn", text: ok ? "Object transform updated." : "Object transform failed." });
+        } else if (type === "scene.parent" && requireModel("Parent objects")) {
+          const ok = viewport.parentObjects?.(payload.childIds || [], payload.parentId ?? null);
+          output.push({ level: ok ? "success" : "warn", text: ok ? "Parent relationship updated." : "Parenting failed." });
+        } else if (type === "scene.fracture" && requireModel("Fracture Objects")) {
+          const created = viewport.fractureObjects?.(payload.ids || [], payload.options || {});
+          output.push({ level: created ? "success" : "warn", text: created ? `Created ${created.name}.` : "Select at least one mesh before running Fracture Objects." });
+        } else if (type === "scene.analyze3dprint" && requireModel("3D Printing Toolbox")) {
+          const report = viewport.analyzeFor3DPrint?.(payload.ids || []);
+          if (!report?.ok) output.push({ level: "warn", text: report?.message || "3D Print analysis failed." });
+          else {
+            const dims = report.dimensions || {};
+            const topology = report.topologySkipped ? "Topology edge scan skipped for very dense geometry" : `${report.openEdges} open edge(s) · ${report.watertight ? "watertight candidate" : "not watertight"}`;
+            output.push({ level: report.watertight === false ? "warn" : "success", text: `3D Print: ${report.meshes} mesh(es) · ${report.triangles.toLocaleString()} triangles · ${report.vertices.toLocaleString()} vertices · bounds ${Number(dims.x || 0).toFixed(3)} × ${Number(dims.y || 0).toFixed(3)} × ${Number(dims.z || 0).toFixed(3)} · ${topology}.` });
+          }
+        } else if (type.startsWith("generate.") && requireModel("Generator")) {
+          const kind = type.slice("generate.".length);
+          const options = kind === "primitive" ? payload : payload;
+          const created = viewport.createGeneratedObject?.(kind, options);
+          output.push({ level: created ? "success" : "warn", text: created ? `Generated ${created.name}.` : `Could not generate ${kind}.` });
+        } else if (type === "material.update" && requireModel("Material update")) {
+          const ok = viewport.updateMaterial?.(payload.materialId, payload.patch || {});
+          output.push({ level: ok ? "success" : "warn", text: ok ? "Material updated." : "Material was not found." });
+        } else if (type === "lighting.set") {
+          updateLighting(payload);
+          output.push({ level: "success", text: "Lighting Studio settings updated." });
+        } else if (type === "export.camera") {
+          exportCameraJson();
+          output.push({ level: "info", text: "Camera JSON export started." });
+        } else if (type === "export.scene") {
+          exportSceneJson();
+          output.push({ level: "info", text: "Scene JSON export started." });
+        } else if (type === "export.transform") {
+          exportTransformJson();
+          output.push({ level: "info", text: "Transform JSON export started." });
+        } else if (type === "export.prompt") {
+          exportPromptTxt();
+          output.push({ level: "info", text: "Prompt TXT export started." });
+        } else if (type === "export.unrealCamera") {
+          exportUnrealCameraJson();
+          output.push({ level: "info", text: "Unreal camera handoff JSON export started." });
+        } else if (type === "project.save") {
+          saveProjectLocally();
+          output.push({ level: "success", text: "Project saved locally." });
+        } else {
+          output.push({ level: "warn", text: `Unknown or unavailable script command: ${type}` });
+        }
+      } catch (commandError) {
+        output.push({ level: "error", text: `${type}: ${commandError?.message || commandError}` });
+      }
+    }
+    return output;
   }
 
   async function copyCameraConfiguration() {
@@ -2059,6 +2318,13 @@ function App() {
           style={{ paddingLeft: `${5 + depth * 13}px` }}
           onClick={(event) => { if (!special) selectOutlinerObject(node.id, event.ctrlKey || event.metaKey); }}
           onDoubleClick={() => { if (!special) renameOutlinerObject(node.id, node.name); }}
+          onContextMenu={(event) => {
+            if (special || !hostOutlinerContributions.length) return;
+            event.preventDefault();
+            event.stopPropagation();
+            if (!selectedSceneIds.includes(node.id)) selectOutlinerObject(node.id, false);
+            setOutlinerContextMenu({ x: event.clientX, y: event.clientY, nodeId: node.id, name: node.name });
+          }}
         >
           <button
             type="button"
@@ -2097,6 +2363,7 @@ function App() {
             <button type="button" onClick={openProjectPicker}><FolderOpen size={12} /> Open project</button>
             <button type="button" onClick={exportMultiviewProject}><Download size={12} /> .multiview</button>
           </nav>
+          {hostToolbarContributions.length > 0 && <div className="extensionGlobalToolbar" aria-label="Extension toolbar">{hostToolbarContributions.map((item) => <button type="button" key={`${item.extension.id}-${item.id}`} onClick={() => runHostContribution(item)} title={`${item.extension.name} · ${item.label}`}>{item.label}</button>)}</div>}
           <div className="blenderAppState"><span className="statusDot" /> Browser-only</div>
         </div>
         <div className="blenderWorkspaceBar">
@@ -2106,7 +2373,9 @@ function App() {
             <button type="button" className={workspaceTab === "camera" ? "active" : ""} onClick={openCameraWorkspace}>Camera</button>
             <button type="button" className={workspaceTab === "material" ? "active" : ""} onClick={() => openStudioWorkspace("material", ".materialStudioSection")}>Material</button>
             <button type="button" className={workspaceTab === "lighting" ? "active" : ""} onClick={() => openStudioWorkspace("lighting", ".lightingStudioSection")}>Lighting</button>
+            <button type="button" className={workspaceTab === "render" ? "active" : ""} onClick={() => { stopAutoOrbit(); setWorkspaceTab("render"); }}>Render</button>
             <button type="button" className={workspaceTab === "export" ? "active" : ""} onClick={() => openStudioWorkspace("export", ".exportStudioSection")}>Export</button>
+            <button type="button" className={workspaceTab === "scripting" ? "active" : ""} onClick={() => { stopAutoOrbit(); setWorkspaceTab("scripting"); }}>Scripting</button>
             <button type="button" className={workspaceTab === "prompt" ? "active" : ""} onClick={openPromptWorkspace}>Prompt</button>
           </div>
           <div className="blenderSceneSelector studioProjectIdentity">
@@ -2117,7 +2386,7 @@ function App() {
               onChange={(event) => setProjectName(event.target.value.slice(0, 80))}
               aria-label="Project name"
             />
-            <span className="blenderVersionBadge">V8.9 PRODUCTION STUDIO</span>
+            <span className="blenderVersionBadge">V8.18 PRODUCTION STUDIO</span>
           </div>
         </div>
       </header>
@@ -2154,7 +2423,7 @@ function App() {
       />
 
       <div className="blenderInfoBar studioInfoBar">
-        <span><Camera size={13} /> Camera Workspace</span>
+        <span><Camera size={13} /> {workspaceTab === "scripting" ? "Scripting Workspace" : "Camera Workspace"}</span>
         <span>{assetType === "model" ? `3D ${modelFormat.toUpperCase()} → Camera` : "Reference → Target"}</span>
         <span>{lensLabel(lensPreset)} Lens</span>
         <span>Focus {focusBadgeText(focusPoint, focusPosition)}</span>
@@ -2168,7 +2437,7 @@ function App() {
         </div>
       </div>
 
-      <section className="workspace blenderWorkspace">
+      <section className={`workspace blenderWorkspace ${["scripting", "render"].includes(workspaceTab) ? "scriptingModeHidden" : ""}`}>
         <div
           className={`panel sourcePanel uiReveal ${dragging ? "sourcePanelDragging" : ""}`}
           onDragEnter={handleSourceDragEnter}
@@ -2413,7 +2682,7 @@ function App() {
                 </div>
               </div>
               <label className="outlinerSearchBox"><Search size={12} /><input value={outlinerSearch} onChange={(event) => setOutlinerSearch(event.target.value)} placeholder="Search scene…" /></label>
-              <div className="sceneOutlinerTree">{filteredSceneGraph ? renderSceneNode(filteredSceneGraph, 0, { count: 0, limit: outlinerSearch.trim() ? 3000 : 1200 }) : <div className="outlinerEmpty">Import a 3D model to build the scene hierarchy.</div>}</div>
+              <div className="sceneOutlinerTree">{filteredSceneGraph ? renderSceneNode(filteredSceneGraph, 0, { count: 0, limit: outlinerSearch.trim() ? 3000 : 1200 }) : <div className="outlinerEmpty">Import a 3D model to build the scene hierarchy.</div>}</div>{hostOutlinerContributions.length > 0 && <div className="extensionOutlinerActions">{hostOutlinerContributions.map((item) => <button type="button" key={`${item.extension.id}-${item.id}`} onClick={() => runHostContribution(item)}>{item.label}</button>)}</div>}
               {filteredSceneGraph && filteredSceneNodeCount > (outlinerSearch.trim() ? 3000 : 1200) && <div className="outlinerLimitNote">Large scene: showing the first {outlinerSearch.trim() ? "3,000" : "1,200"} matching nodes. Use Search or collapse groups to narrow the tree.</div>}
               <div className="outlinerFooterActions">
                 <button type="button" onClick={duplicateSelectedObjects} disabled={!selectedSceneIds.length}><CopyPlus size={12} /> Duplicate</button>
@@ -2936,6 +3205,17 @@ function App() {
                     </details>
                   )}
 
+                  {assetType === "model" && hostInspectorContributions.length > 0 && (
+                    <div className="extensionInspectorHost">
+                      {hostInspectorContributions.map((panel) => (
+                        <details key={`${panel.extension.id}-${panel.id}`}>
+                          <summary><Puzzle size={12} /><span><b>{panel.title || panel.label}</b><small>{panel.extension.name}</small></span><ChevronDown size={12} /></summary>
+                          <div>{(panel.actionIds || []).map((actionId) => { const action = panel.extension.actions?.find((item) => item.id === actionId); return action ? <button type="button" key={actionId} onClick={() => runHostExtensionSource(action.script, panel.extension, `${panel.extension.name} › ${action.label}`)}>{action.label}</button> : null; })}</div>
+                        </details>
+                      ))}
+                    </div>
+                  )}
+
                   {assetType === "model" && (
                     <details className="cameraControlSection studioModuleSection exportStudioSection">
                       <summary><Download size={13} /><span><b>Export Studio</b><small>Images, JSON, prompt, project, and camera batches</small></span><ChevronDown size={13} /></summary>
@@ -2957,7 +3237,7 @@ function App() {
                           <button type="button" onClick={exportTransformJson}><FileJson size={12} /> Transform JSON</button>
                           <button type="button" onClick={exportPromptTxt}><Download size={12} /> Prompt TXT</button>
                           <button type="button" onClick={exportMultiviewProject}><Download size={12} /> .multiview</button>
-                          <button type="button" onClick={copyCameraConfiguration}><Copy size={12} /> Copy camera</button>
+                          <button type="button" onClick={copyCameraConfiguration}><Copy size={12} /> Copy camera</button>{hostExporterContributions.map((item) => <button type="button" key={`${item.extension.id}-${item.id}`} onClick={() => runHostContribution(item)}><Download size={12} /> {item.label}</button>)}
                         </div>
                         <div className="savedCameraPanel">
                           <div className="savedCameraHead"><strong>Saved cameras</strong><button type="button" onClick={saveCurrentCamera}><Save size={11} /> Save camera</button></div>
@@ -3240,6 +3520,45 @@ function App() {
         </div>
       </section>
 
+      {workspaceTab === "scripting" && (
+        <Suspense fallback={<div className="scriptingWorkspaceLoading">Loading Scripting workspace…</div>}>
+          <ScriptingStudio snapshot={studioSnapshot} onExecuteCommands={executeStudioCommands} />
+        </Suspense>
+      )}
+
+      {workspaceTab === "render" && (
+        <Suspense fallback={<div className="scriptingWorkspaceLoading">Loading Render Studio…</div>}>
+          <RenderStudio
+            projectName={projectName}
+            assetReady={assetType === "model" && modelLoadState.status === "ready"}
+            currentCamera={{ id: "current", name: "Current Camera", camera: { ...camera }, lensPreset, projection: viewportProjection, focusPoint, focusPosition: { ...focusPosition } }}
+            savedCameras={savedCameras}
+            onApplyCamera={async (snapshot) => { applySavedCamera(snapshot); }}
+            onRestoreCamera={async (snapshot) => { applySavedCamera(snapshot); }}
+            captureRender={async (options) => threeViewportRef.current?.captureScreenshot?.(options)}
+            lightingConfig={lightingConfig}
+            onLightingChange={updateLighting}
+            onPickHdri={openEnvironmentPicker}
+            onExportCameraJson={exportCameraJson}
+            onExportSceneJson={exportSceneJson}
+            onExportTransformJson={exportTransformJson}
+            onExportPromptTxt={exportPromptTxt}
+            onExportProject={exportMultiviewProject}
+            onCopyCamera={copyCameraConfiguration}
+            snapshot={studioSnapshot}
+            onExecuteCommands={executeStudioCommands}
+            onError={setError}
+          />
+        </Suspense>
+      )}
+
+      {outlinerContextMenu && hostOutlinerContributions.length > 0 && (
+        <div className="extensionOutlinerContextMenu" style={{ left: `${Math.min(outlinerContextMenu.x, window.innerWidth - 220)}px`, top: `${Math.min(outlinerContextMenu.y, window.innerHeight - 180)}px` }} onPointerDown={(event) => event.stopPropagation()}>
+          <strong>{outlinerContextMenu.name || "Object"}</strong>
+          {hostOutlinerContributions.map((item) => <button type="button" key={`${item.extension.id}-${item.id}`} onClick={() => { runHostContribution(item); setOutlinerContextMenu(null); }}>{item.label}<small>{item.extension.name}</small></button>)}
+        </div>
+      )}
+
       <div className="blenderStatusBar" role="status">
         <div className="blenderStatusLeft">
           <span><b>{safeProjectName(projectName)}</b></span>
@@ -3250,7 +3569,11 @@ function App() {
           <span>{assetType === "model" ? viewportProjection === "orthographic" ? "Ortho" : "Perspective" : `Focus ${focusBadgeText(focusPoint, focusPosition)}`}</span>
         </div>
         <div className="blenderStatusRight">
-          {assetType === "model" ? (
+          {workspaceTab === "scripting" ? (
+            <><span>Ctrl+Enter Run</span><span>Tab Indent</span><span>.mvext Extensions</span><span>Worker Runtime</span></>
+          ) : workspaceTab === "render" ? (
+            <><span>Render Queue</span><span>PNG / JPEG / WebP</span><span>SSAA</span><span>Batch Cameras</span></>
+          ) : assetType === "model" ? (
             <><span>LMB Orbit</span><span>Shift+LMB Pan</span><span>Wheel Dolly</span><span>Click Select</span></>
           ) : (
             <><span>LMB Drag Orbit</span><span>Wheel Zoom</span><span>Shift Precision</span><span>Space Loop</span></>
@@ -3258,7 +3581,7 @@ function App() {
         </div>
       </div>
 
-      {results.length > 0 && (
+      {results.length > 0 && !["scripting", "render"].includes(workspaceTab) && (
         <section className="resultsSection uiReveal" aria-live="polite">
           <div className="resultsHead">
             <div className="panelTitle">

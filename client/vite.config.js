@@ -25,6 +25,8 @@ export default defineConfig({
           }
           if (path.includes("/three/examples/jsm/libs/meshopt_decoder")) return "decoder-meshopt";
           if (path.includes("/three/examples/jsm/environments/")) return "three-environments";
+          if (path.includes("/three/examples/jsm/postprocessing/")) return "three-postprocessing";
+          if (path.includes("/three/examples/jsm/shaders/")) return "three-shaders";
           if (path.includes("/three/examples/jsm/controls/")) return "three-controls";
           if (path.includes("/node_modules/three/")) return "three-core";
           if (path.includes("/node_modules/react/") || path.includes("/node_modules/react-dom/")) return "react-vendor";
