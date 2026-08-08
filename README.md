@@ -343,22 +343,20 @@ This combined update keeps the V7.1 Blender-style workspace and upgrades the act
 
 Everything still runs locally in the browser. No AI model, backend, or cloud API is required.
 
+## V8.0.1 — Vercel deployment + bundle optimization
 
-## V7.3.2 — Target Camera Prompt Engine
+- Adds a root `vercel.json` with the correct output directory: `client/dist`.
+- Uses the root build command (`npm run build`) and client install command (`npm run install:all`).
+- Adds SPA fallback routing for Vite on Vercel.
+- Lazy-loads the Three.js 3D viewport only when a 3D model is opened.
+- Splits React, Three.js core, Three.js loaders/controls, and icons into cache-friendly production chunks.
+- Raises the chunk warning threshold only for the intentionally isolated Three.js bundle; it does not change runtime behavior.
 
-Generated prompts now contain an explicit structured camera specification:
+### Vercel Root Directory
 
-```text
-Target camera:
-View: front-right three-quarter view elevated shot medium shot
-Azimuth: 42°
-Elevation: 16°
-Distance: 36%
-Lens / FOV: 85mm
-Projection: Perspective
-Focus target: Center
-Framing: square 1:1 framing
-```
+The package supports both Vercel setups:
 
-The prompt engine tells ChatGPT to treat these values as explicit instructions and not substitute a different camera setup. The result UI also shows the Target camera specification as a compact data grid before copying the prompt.
-# camera-angle
+- Repository root selected as Root Directory: root `vercel.json` deploys `client/dist`.
+- `client` selected as Root Directory: `client/vercel.json` deploys `dist`.
+
+Do not set the Vercel Output Directory to `public`; Vite's production output is `dist`.

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
@@ -450,7 +450,35 @@ export function supportedModelExtensions() {
   return Array.from(MODEL_EXTENSIONS);
 }
 
-export default function ThreeModelViewport({
+const DEFAULT_MODEL_TRANSFORM = {
+  position: { x: 0, y: 0, z: 0 },
+  rotation: { x: 0, y: 0, z: 0 },
+  scale: { x: 1, y: 1, z: 1 },
+};
+
+function normalizedTransform(transform) {
+  const source = transform || DEFAULT_MODEL_TRANSFORM;
+  const safe = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+  return {
+    position: {
+      x: safe(source.position?.x, 0),
+      y: safe(source.position?.y, 0),
+      z: safe(source.position?.z, 0),
+    },
+    rotation: {
+      x: safe(source.rotation?.x, 0),
+      y: safe(source.rotation?.y, 0),
+      z: safe(source.rotation?.z, 0),
+    },
+    scale: {
+      x: Math.max(0.001, safe(source.scale?.x, 1)),
+      y: Math.max(0.001, safe(source.scale?.y, 1)),
+      z: Math.max(0.001, safe(source.scale?.z, 1)),
+    },
+  };
+}
+
+const ThreeModelViewport = forwardRef(function ThreeModelViewport({
   mainFile,
   files = [],
   cameraState,
@@ -461,13 +489,14 @@ export default function ThreeModelViewport({
   shadingMode = "material",
   showGrid = true,
   showGround = true,
+  modelTransform = DEFAULT_MODEL_TRANSFORM,
   resetTransformSignal = 0,
   onModelInfo,
   onLoadState,
   onSelectionChange,
   onCameraStateChange,
   onError,
-}) {
+}, forwardedRef) {
   const hostRef = useRef(null);
   const sceneRef = useRef(null);
   const rendererRef = useRef(null);
@@ -497,6 +526,35 @@ export default function ThreeModelViewport({
   const [progressLabel, setProgressLabel] = useState("");
   const [selectedName, setSelectedName] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
+
+  useImperativeHandle(forwardedRef, () => ({
+    async captureScreenshot() {
+      const renderer = rendererRef.current;
+      const scene = sceneRef.current;
+      const camera = getActiveCamera();
+      if (!renderer || !scene || !camera) throw new Error("3D viewport is not ready.");
+      const selectionHelper = selectionHelperRef.current;
+      const selectionWasVisible = selectionHelper?.visible;
+      if (selectionHelper) selectionHelper.visible = false;
+      renderer.render(scene, camera);
+      return new Promise((resolve, reject) => {
+        renderer.domElement.toBlob((blob) => {
+          if (selectionHelper) selectionHelper.visible = selectionWasVisible !== false;
+          if (blob) resolve(blob);
+          else reject(new Error("Could not capture the viewport."));
+        }, "image/png");
+      });
+    },
+    getSelectedObject() {
+      return selectedName || "";
+    },
+    retryLoad() {
+      setReloadToken((value) => value + 1);
+    },
+    cancelLoad() {
+      activeLoadRef.current?.cancel?.();
+    },
+  }), [selectedName]);
 
   const totalBytes = useMemo(() => files.reduce((sum, file) => sum + (file?.size || 0), 0), [files]);
 
@@ -575,7 +633,7 @@ export default function ThreeModelViewport({
     orthographic.position.copy(perspective.position);
     camerasRef.current = { perspective, orthographic };
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance" });
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance", preserveDrawingBuffer: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -738,6 +796,40 @@ export default function ThreeModelViewport({
 
   useEffect(() => {
     const object = modelRef.current;
+    const base = modelInitialTransformRef.current;
+    if (!object || !base) return;
+    const next = normalizedTransform(modelTransform);
+    const radius = modelRadiusRef.current || 1;
+    object.position.set(
+      base.position.x + next.position.x * radius,
+      base.position.y + next.position.y * radius,
+      base.position.z + next.position.z * radius,
+    );
+    const deltaQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+      THREE.MathUtils.degToRad(next.rotation.x),
+      THREE.MathUtils.degToRad(next.rotation.y),
+      THREE.MathUtils.degToRad(next.rotation.z),
+      "XYZ",
+    ));
+    object.quaternion.copy(base.quaternion).multiply(deltaQuaternion);
+    object.scale.set(
+      base.scale.x * next.scale.x,
+      base.scale.y * next.scale.y,
+      base.scale.z * next.scale.z,
+    );
+    object.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(object);
+    if (!box.isEmpty()) {
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      modelRadiusRef.current = Math.max(size.length() * 0.5, 0.25);
+      modelTargetRef.current.copy(center);
+    }
+    selectionHelperRef.current?.update?.();
+  }, [modelTransform]);
+
+  useEffect(() => {
+    const object = modelRef.current;
     const transform = modelInitialTransformRef.current;
     if (!object || !transform || !resetTransformSignal) return;
     object.position.copy(transform.position);
@@ -816,6 +908,33 @@ export default function ThreeModelViewport({
           quaternion: object.quaternion.clone(),
           scale: object.scale.clone(),
         };
+        const importedTransform = normalizedTransform(modelTransform);
+        object.position.set(
+          modelInitialTransformRef.current.position.x + importedTransform.position.x * normalized.radius,
+          modelInitialTransformRef.current.position.y + importedTransform.position.y * normalized.radius,
+          modelInitialTransformRef.current.position.z + importedTransform.position.z * normalized.radius,
+        );
+        const importedRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+          THREE.MathUtils.degToRad(importedTransform.rotation.x),
+          THREE.MathUtils.degToRad(importedTransform.rotation.y),
+          THREE.MathUtils.degToRad(importedTransform.rotation.z),
+          "XYZ",
+        ));
+        object.quaternion.copy(modelInitialTransformRef.current.quaternion).multiply(importedRotation);
+        object.scale.set(
+          modelInitialTransformRef.current.scale.x * importedTransform.scale.x,
+          modelInitialTransformRef.current.scale.y * importedTransform.scale.y,
+          modelInitialTransformRef.current.scale.z * importedTransform.scale.z,
+        );
+        object.updateMatrixWorld(true);
+        const transformedBox = new THREE.Box3().setFromObject(object);
+        if (!transformedBox.isEmpty()) {
+          const transformedSize = transformedBox.getSize(new THREE.Vector3());
+          const transformedCenter = transformedBox.getCenter(new THREE.Vector3());
+          modelRadiusRef.current = Math.max(transformedSize.length() * 0.5, 0.25);
+          modelTargetRef.current.copy(transformedCenter);
+          baseFocusTargetRef.current.copy(transformedCenter);
+        }
         scene.add(object);
         modelRef.current = object;
         applyShading(object, shadingMode);
@@ -932,7 +1051,7 @@ export default function ThreeModelViewport({
     }
     controls.update();
     syncingCameraRef.current = false;
-  }, [cameraState, lensPreset, focusPosition, projectionMode]);
+  }, [cameraState, lensPreset, focusPosition, projectionMode, modelTransform]);
 
   const cancelCurrentLoad = () => activeLoadRef.current?.cancel?.();
 
@@ -958,4 +1077,6 @@ export default function ThreeModelViewport({
       )}
     </div>
   );
-}
+});
+
+export default ThreeModelViewport;

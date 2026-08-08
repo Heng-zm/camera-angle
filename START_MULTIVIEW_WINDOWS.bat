@@ -3,8 +3,8 @@ setlocal
 cd /d "%~dp0"
 
 echo ========================================
-echo MultiView Camera Prompt Builder V7.3
-echo V7.2 Import Stability + V7.3 Real 3D Viewport
+echo MultiView Camera Studio V8.0
+echo Real 3D · Projects · Camera Export · Browser-only
 echo ========================================
 echo.
 

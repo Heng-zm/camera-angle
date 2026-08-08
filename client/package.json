@@ -1,7 +1,7 @@
 {
-  "name": "multiview-camera-prompt-builder-client",
+  "name": "multiview-camera-studio-client",
   "private": true,
-  "version": "7.3.2",
+  "version": "8.0.1",
   "type": "module",
   "scripts": {
     "check:deps": "node scripts/ensure-dependencies.mjs",

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   Aperture,
   Camera,
@@ -7,15 +7,17 @@ import {
   Copy,
   Crosshair,
   Download,
+  FolderOpen,
   ImagePlus,
   Orbit,
   Rotate3d,
+  Save,
   Trash2,
   UploadCloud,
   X,
   Zap,
 } from "lucide-react";
-import ThreeModelViewport, { isSupportedModelFile } from "./ThreeModelViewport.jsx";
+const ThreeModelViewport = lazy(() => import("./ThreeModelViewport.jsx"));
 
 const ANGLES = [
   { key: "front", label: "Front", deg: "0°", hint: "Straight" },
@@ -61,6 +63,10 @@ const MAX_MODEL_BUNDLE_BYTES = 250 * 1024 * 1024;
 function extensionFromName(name = "") {
   const parts = name.toLowerCase().split(".");
   return parts.length > 1 ? parts.pop() : "";
+}
+
+function isSupportedModelFile(file) {
+  return Boolean(file && MODEL_EXTENSIONS.includes(extensionFromName(file.name)));
 }
 
 function fileStem(name = "") {
@@ -357,7 +363,12 @@ function targetViewText(targetKey, camera, cameraSummary, lensPreset, focusPoint
   return `${spec.view}; Az ${spec.azimuth}° · El ${spec.elevation}° · Dist ${spec.distance} · ${spec.lens} · Focus ${spec.focus}`;
 }
 
-function buildLocalPrompt({ currentViewKey, targetKey, camera, cameraSummary, background, size, customPrompt, lensPreset, focusPoint, focusPosition, assetType = "image", modelFormat = "", projectionMode = "perspective" }) {
+function modelTransformPrompt(transform) {
+  const normalized = normalizeProjectTransform(transform);
+  return `Object transform: Position X ${normalized.position.x.toFixed(2)}, Y ${normalized.position.y.toFixed(2)}, Z ${normalized.position.z.toFixed(2)}; Rotation X ${normalized.rotation.x.toFixed(1)}°, Y ${normalized.rotation.y.toFixed(1)}°, Z ${normalized.rotation.z.toFixed(1)}°; Scale X ${normalized.scale.x.toFixed(3)}, Y ${normalized.scale.y.toFixed(3)}, Z ${normalized.scale.z.toFixed(3)}. Preserve this transformed pose/orientation in the target render.`;
+}
+
+function buildLocalPrompt({ currentViewKey, targetKey, camera, cameraSummary, background, size, customPrompt, lensPreset, focusPoint, focusPosition, assetType = "image", modelFormat = "", projectionMode = "perspective", modelTransform = DEFAULT_MODEL_TRANSFORM }) {
   const currentView = assetType === "model"
     ? `3D model asset${modelFormat ? ` (${modelFormat.toUpperCase()})` : ""} with no fixed source-camera viewpoint`
     : viewDescription(currentViewKey);
@@ -378,6 +389,7 @@ function buildLocalPrompt({ currentViewKey, targetKey, camera, cameraSummary, ba
       : "Use the uploaded image as a strict visual/identity reference for the exact same subject or product.",
     `Current/source reference: ${currentView}.`,
     targetCameraBlock(targetSpec),
+    assetType === "model" ? modelTransformPrompt(modelTransform) : "",
     `Camera target / focus point instruction: ${focusPrompt(focusPoint, focusPosition)}`,
     assetType === "model"
       ? "Render the same 3D geometry FROM the Target camera specification above. Do not alter the model geometry, proportions, topology, materials, textures, UV appearance, labels, logos, or distinctive details."
@@ -395,8 +407,54 @@ function buildLocalPrompt({ currentViewKey, targetKey, camera, cameraSummary, ba
   ].filter(Boolean).join("\n\n");
 }
 
+const DEFAULT_MODEL_TRANSFORM = {
+  position: { x: 0, y: 0, z: 0 },
+  rotation: { x: 0, y: 0, z: 0 },
+  scale: { x: 1, y: 1, z: 1 },
+};
+
+function cloneDefaultModelTransform() {
+  return {
+    position: { ...DEFAULT_MODEL_TRANSFORM.position },
+    rotation: { ...DEFAULT_MODEL_TRANSFORM.rotation },
+    scale: { ...DEFAULT_MODEL_TRANSFORM.scale },
+  };
+}
+
+function safeProjectName(value = "") {
+  const cleaned = String(value || "Untitled Camera Studio").trim().replace(/[\\/:*?"<>|]+/g, "-");
+  return cleaned || "Untitled Camera Studio";
+}
+
+function projectFileName(name, extension) {
+  return `${safeProjectName(name).replace(/\s+/g, "-").toLowerCase()}.${extension}`;
+}
+
+function normalizeProjectTransform(value) {
+  const safe = (input, fallback) => Number.isFinite(Number(input)) ? Number(input) : fallback;
+  return {
+    position: {
+      x: safe(value?.position?.x, 0),
+      y: safe(value?.position?.y, 0),
+      z: safe(value?.position?.z, 0),
+    },
+    rotation: {
+      x: safe(value?.rotation?.x, 0),
+      y: safe(value?.rotation?.y, 0),
+      z: safe(value?.rotation?.z, 0),
+    },
+    scale: {
+      x: Math.max(0.001, safe(value?.scale?.x, 1)),
+      y: Math.max(0.001, safe(value?.scale?.y, 1)),
+      z: Math.max(0.001, safe(value?.scale?.z, 1)),
+    },
+  };
+}
+
 function App() {
   const inputRef = useRef(null);
+  const projectFileInputRef = useRef(null);
+  const threeViewportRef = useRef(null);
   const cameraStageRef = useRef(null);
   const orbitDragRef = useRef(null);
   const inertiaFrameRef = useRef(null);
@@ -414,7 +472,18 @@ function App() {
   const [viewportGrid, setViewportGrid] = useState(true);
   const [viewportGround, setViewportGround] = useState(true);
   const [modelTransformResetSignal, setModelTransformResetSignal] = useState(0);
+  const [modelTransform, setModelTransform] = useState(() => cloneDefaultModelTransform());
   const [selectedModelObject, setSelectedModelObject] = useState(null);
+  const [projectName, setProjectName] = useState("Untitled Camera Studio");
+  const [lastSavedAt, setLastSavedAt] = useState("");
+  const [savedProjects, setSavedProjects] = useState(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem("multiview-v8-projects") || "[]");
+      return Array.isArray(parsed) ? parsed.slice(0, 12) : [];
+    } catch {
+      return [];
+    }
+  });
   const [recentImports, setRecentImports] = useState(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem("multiview-recent-3d-imports") || "[]");
@@ -456,6 +525,14 @@ function App() {
       if (preview) URL.revokeObjectURL(preview);
     };
   }, [preview]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("multiview-v8-projects", JSON.stringify(savedProjects.slice(0, 12)));
+    } catch {
+      // Local storage can be unavailable in private/restricted browser modes.
+    }
+  }, [savedProjects]);
 
   useEffect(() => {
     try {
@@ -551,7 +628,7 @@ function App() {
 
   useEffect(() => {
     if (results.length) resetRunState();
-  }, [camera, lensPreset, focusPoint, focusPosition, currentViewKey, background, size, customPrompt, angleMode, selected, viewportProjection]);
+  }, [camera, lensPreset, focusPoint, focusPosition, currentViewKey, background, size, customPrompt, angleMode, selected, viewportProjection, modelTransform]);
 
   function resetRunState() {
     setResults([]);
@@ -588,6 +665,8 @@ function App() {
       setModelInfo(null);
       setModelLoadState({ status: "loading", progress: 0, label: "Queued" });
       setSelectedModelObject(null);
+      setModelTransform(cloneDefaultModelTransform());
+      setModelTransformResetSignal((value) => value + 1);
       setImageInputMethod(inputMethod);
       setRecentImports((current) => {
         const entry = {
@@ -619,6 +698,7 @@ function App() {
       setModelInfo(null);
       setModelLoadState({ status: "idle", progress: 0, label: "" });
       setSelectedModelObject(null);
+      setModelTransform(cloneDefaultModelTransform());
       setPreview(URL.createObjectURL(imageMain));
       setImageInputMethod(inputMethod);
       setDragging(false);
@@ -715,6 +795,8 @@ function App() {
     setModelInfo(null);
     setModelLoadState({ status: "idle", progress: 0, label: "" });
     setSelectedModelObject(null);
+    setModelTransform(cloneDefaultModelTransform());
+    setModelTransformResetSignal((value) => value + 1);
     setImageInputMethod("");
     setDragging(false);
     dragDepthRef.current = 0;
@@ -1065,6 +1147,259 @@ function App() {
     setRecentImports([]);
   }
 
+  function resetModelTransform() {
+    setModelTransform(cloneDefaultModelTransform());
+    setModelTransformResetSignal((value) => value + 1);
+    resetRunState();
+  }
+
+  function updateModelTransform(group, axis, rawValue) {
+    if (busy || assetType !== "model") return;
+    const fallback = group === "scale" ? 1 : 0;
+    const value = Number.isFinite(Number(rawValue)) ? Number(rawValue) : fallback;
+    setModelTransform((current) => ({
+      ...current,
+      [group]: {
+        ...current[group],
+        [axis]: group === "scale" ? Math.max(0.001, value) : value,
+      },
+    }));
+    resetRunState();
+  }
+
+  function setUniformModelScale(rawValue) {
+    const value = Math.max(0.001, Number.isFinite(Number(rawValue)) ? Number(rawValue) : 1);
+    setModelTransform((current) => ({
+      ...current,
+      scale: { x: value, y: value, z: value },
+    }));
+    resetRunState();
+  }
+
+  function createProjectSnapshot() {
+    const assetFiles = fileBundle.map((item) => ({
+      name: item.name,
+      size: item.size || 0,
+      type: item.type || "",
+      lastModified: item.lastModified || 0,
+    }));
+    return {
+      format: "multiview-camera-studio",
+      version: "8.0",
+      projectName: safeProjectName(projectName),
+      savedAt: new Date().toISOString(),
+      asset: {
+        type: assetType,
+        primary: file?.name || "",
+        format: file ? extensionFromName(file.name) : "",
+        files: assetFiles,
+        embedded: false,
+      },
+      camera: {
+        azimuth: camera.azimuth,
+        elevation: camera.elevation,
+        distance: camera.distance,
+        lensPreset,
+        projection: viewportProjection,
+        focusPoint,
+        focusPosition: { ...focusPosition },
+      },
+      viewport: {
+        shading: viewportShading,
+        grid: viewportGrid,
+        ground: viewportGround,
+      },
+      objectTransform: normalizeProjectTransform(modelTransform),
+      prompt: {
+        angleMode,
+        selectedAngles: [...selected],
+        currentViewKey,
+        background,
+        size,
+        customPrompt,
+        runSize,
+        generatedResults: results.slice(0, 20),
+      },
+      selection: selectedModelObject ? { ...selectedModelObject } : null,
+      modelSummary: modelInfo ? {
+        format: modelInfo.format,
+        meshes: modelInfo.meshes,
+        vertices: modelInfo.vertices,
+        triangles: modelInfo.triangles,
+        materials: modelInfo.materials?.count || 0,
+      } : null,
+    };
+  }
+
+  function applyProjectSnapshot(snapshot, sourceLabel = "project") {
+    if (!snapshot || snapshot.format !== "multiview-camera-studio") {
+      setError("This is not a valid MultiView Camera Studio project.");
+      return false;
+    }
+    const projectCamera = snapshot.camera || {};
+    const viewport = snapshot.viewport || {};
+    const prompt = snapshot.prompt || {};
+    takeManualCameraControl();
+    setProjectName(safeProjectName(snapshot.projectName || "Untitled Camera Studio"));
+    setCamera({
+      azimuth: normalizeAzimuth(numberOr(projectCamera.azimuth, 35)),
+      elevation: clamp(numberOr(projectCamera.elevation, 25), -89, 89),
+      distance: clamp(numberOr(projectCamera.distance, 38), 0, 100),
+    });
+    setLensPreset(LENS_PRESETS.some((item) => item.key === projectCamera.lensPreset) ? projectCamera.lensPreset : "85mm");
+    setViewportProjection(projectCamera.projection === "orthographic" ? "orthographic" : "perspective");
+    setFocusPoint(["center", "front", "top", "logo", "custom"].includes(projectCamera.focusPoint) ? projectCamera.focusPoint : "center");
+    setFocusPosition({
+      x: clamp(numberOr(projectCamera.focusPosition?.x, 50), 0, 100),
+      y: clamp(numberOr(projectCamera.focusPosition?.y, 49), 0, 100),
+    });
+    setViewportShading(["material", "solid", "wireframe", "normal"].includes(viewport.shading) ? viewport.shading : "material");
+    setViewportGrid(viewport.grid !== false);
+    setViewportGround(viewport.ground !== false);
+    setModelTransform(normalizeProjectTransform(snapshot.objectTransform));
+    setAngleMode(prompt.angleMode === "preset" ? "preset" : "3d");
+    setSelected(Array.isArray(prompt.selectedAngles) && prompt.selectedAngles.length ? prompt.selectedAngles.filter((key) => ANGLES.some((item) => item.key === key)) : ["front45"]);
+    setCurrentViewKey(ANGLES.some((item) => item.key === prompt.currentViewKey) ? prompt.currentViewKey : "top45");
+    setBackground(prompt.background === "original" ? "original" : "white");
+    setSize(["1024x1024", "1536x1024", "1024x1536"].includes(prompt.size) ? prompt.size : "1024x1024");
+    setCustomPrompt(String(prompt.customPrompt || "").slice(0, 1000));
+    setRunSize(["1024x1024", "1536x1024", "1024x1536"].includes(prompt.runSize) ? prompt.runSize : (["1024x1024", "1536x1024", "1024x1536"].includes(prompt.size) ? prompt.size : "1024x1024"));
+    setResults(Array.isArray(prompt.generatedResults) ? prompt.generatedResults.slice(0, 20) : []);
+    setWorkspaceTab(Array.isArray(prompt.generatedResults) && prompt.generatedResults.length ? "prompt" : "camera");
+    setLastSavedAt(snapshot.savedAt || new Date().toISOString());
+
+    const requiredNames = (snapshot.asset?.files || []).map((item) => item.name).filter(Boolean);
+    const loadedNames = new Set(fileBundle.map((item) => item.name));
+    const missingAsset = requiredNames.length > 0 && requiredNames.some((name) => !loadedNames.has(name));
+    if (missingAsset) {
+      setError(`${sourceLabel} loaded. Camera/project settings were restored, but the original asset files are not embedded. Re-import: ${requiredNames.slice(0, 4).join(", ")}${requiredNames.length > 4 ? "…" : ""}`);
+    } else {
+      setError("");
+    }
+    return true;
+  }
+
+  function saveProjectLocally() {
+    const snapshot = createProjectSnapshot();
+    const id = `${safeProjectName(projectName).toLowerCase()}-${Date.now()}`;
+    const entry = {
+      id,
+      name: safeProjectName(projectName),
+      savedAt: snapshot.savedAt,
+      assetName: snapshot.asset.primary || "No asset",
+      assetType: snapshot.asset.type,
+      snapshot,
+    };
+    setSavedProjects((current) => [entry, ...current.filter((item) => item.name !== entry.name)].slice(0, 12));
+    setLastSavedAt(snapshot.savedAt);
+    setError("");
+  }
+
+  function deleteSavedProject(id) {
+    setSavedProjects((current) => current.filter((item) => item.id !== id));
+  }
+
+  function exportMultiviewProject() {
+    const snapshot = createProjectSnapshot();
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    triggerDownload(url, projectFileName(projectName, "multiview"));
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+    setLastSavedAt(snapshot.savedAt);
+  }
+
+  function openProjectPicker() {
+    if (!projectFileInputRef.current) return;
+    projectFileInputRef.current.value = "";
+    projectFileInputRef.current.click();
+  }
+
+  async function importMultiviewProject(fileToOpen) {
+    if (!fileToOpen) return;
+    try {
+      const snapshot = JSON.parse(await fileToOpen.text());
+      if (applyProjectSnapshot(snapshot, `.multiview project`)) {
+        setProjectName(safeProjectName(snapshot.projectName || fileToOpen.name.replace(/\.multiview$/i, "")));
+      }
+    } catch (projectError) {
+      setError(`Could not open project: ${projectError?.message || "invalid .multiview file"}`);
+    }
+  }
+
+  function exportCameraJson() {
+    const targetSpec = getTargetCameraSpec({
+      targetKey: angleMode === "3d" ? "custom3d" : (selected[0] || "front45"),
+      camera,
+      cameraSummary,
+      lensPreset,
+      focusPoint,
+      focusPosition,
+      size,
+      projectionMode: assetType === "model" ? viewportProjection : "perspective",
+    });
+    const payload = {
+      format: "multiview-camera-json",
+      version: "8.0",
+      projectName: safeProjectName(projectName),
+      exportedAt: new Date().toISOString(),
+      targetCamera: targetSpec,
+      rawCamera: {
+        azimuth: camera.azimuth,
+        elevation: camera.elevation,
+        distance: camera.distance,
+        lensPreset,
+        projection: assetType === "model" ? viewportProjection : "perspective",
+        focusPoint,
+        focusPosition,
+      },
+      objectTransform: assetType === "model" ? normalizeProjectTransform(modelTransform) : null,
+      viewport: assetType === "model" ? { shading: viewportShading, grid: viewportGrid, ground: viewportGround } : null,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    triggerDownload(url, projectFileName(projectName, "camera.json"));
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  async function exportViewportScreenshot() {
+    if (assetType !== "model" || modelLoadState.status !== "ready") {
+      setError("Load a ready 3D model before exporting a viewport screenshot.");
+      return;
+    }
+    try {
+      const blob = await threeViewportRef.current?.captureScreenshot?.();
+      if (!blob) throw new Error("Viewport capture returned no image.");
+      const url = URL.createObjectURL(blob);
+      triggerDownload(url, projectFileName(projectName, "viewport.png"));
+      window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+      setError("");
+    } catch (captureError) {
+      setError(`Screenshot failed: ${captureError?.message || "unknown error"}`);
+    }
+  }
+
+  function newProject() {
+    takeManualCameraControl();
+    removeFile();
+    setProjectName("Untitled Camera Studio");
+    setCamera({ azimuth: 35, elevation: 25, distance: 38 });
+    setLensPreset("85mm");
+    setFocusPoint("center");
+    setFocusPosition({ x: 50, y: 49 });
+    setViewportProjection("perspective");
+    setViewportShading("material");
+    setViewportGrid(true);
+    setViewportGround(true);
+    setModelTransform(cloneDefaultModelTransform());
+    setBackground("white");
+    setSize("1024x1024");
+    setCustomPrompt("");
+    setSelected(["front45", "side90", "top45"]);
+    setCurrentViewKey("top45");
+    setLastSavedAt("");
+    setWorkspaceTab("layout");
+  }
+
   function runAction() {
     takeManualCameraControl();
     if (!file) {
@@ -1100,6 +1435,7 @@ function App() {
       focusPoint,
       focusPosition,
       projectionMode: assetType === "model" ? viewportProjection : "perspective",
+      modelTransform: assetType === "model" ? normalizeProjectTransform(modelTransform) : null,
       targetCameraSpec: getTargetCameraSpec({
         targetKey: angleKey,
         camera,
@@ -1134,6 +1470,7 @@ function App() {
         assetType,
         modelFormat: assetType === "model" ? extensionFromName(file?.name) : "",
         projectionMode: assetType === "model" ? viewportProjection : "perspective",
+        modelTransform,
       }),
     }));
 
@@ -1220,12 +1557,14 @@ function App() {
             <span className="blenderBrandMark"><Aperture size={16} /></span>
             <strong>MultiView Camera</strong>
           </div>
-          <nav className="blenderMenus" aria-label="Workspace actions">
+          <nav className="blenderMenus projectMenus" aria-label="Project actions">
+            <button type="button" onClick={newProject}>New</button>
             <button type="button" onClick={() => { openLayoutWorkspace(); openFilePicker(); }}>Open asset</button>
-            <button type="button" onClick={openCameraWorkspace}>Camera</button>
-            <button type="button" onClick={openPromptWorkspace}>Prompt</button>
+            <button type="button" onClick={saveProjectLocally}><Save size={12} /> Save</button>
+            <button type="button" onClick={openProjectPicker}><FolderOpen size={12} /> Open project</button>
+            <button type="button" onClick={exportMultiviewProject}><Download size={12} /> .multiview</button>
           </nav>
-          <div className="blenderAppState"><span className="statusDot" /> Local Session</div>
+          <div className="blenderAppState"><span className="statusDot" /> Browser-only</div>
         </div>
         <div className="blenderWorkspaceBar">
           <div className="blenderWorkspaceTabs" aria-label="Workspace tabs">
@@ -1233,20 +1572,38 @@ function App() {
             <button type="button" className={workspaceTab === "camera" ? "active" : ""} onClick={openCameraWorkspace}>Camera</button>
             <button type="button" className={workspaceTab === "prompt" ? "active" : ""} onClick={openPromptWorkspace}>Prompt</button>
           </div>
-          <div className="blenderSceneSelector">
-            <span>Scene</span>
-            <strong>Camera_Setup · 3D Assets</strong>
-            <span className="blenderVersionBadge">V7.3 REAL 3D</span>
+          <div className="blenderSceneSelector studioProjectIdentity">
+            <span>Project</span>
+            <input
+              className="projectNameInput"
+              value={projectName}
+              onChange={(event) => setProjectName(event.target.value.slice(0, 80))}
+              aria-label="Project name"
+            />
+            <span className="blenderVersionBadge">V8.0 CAMERA STUDIO</span>
           </div>
         </div>
       </header>
 
-      <div className="blenderInfoBar">
+      <input
+        ref={projectFileInputRef}
+        hidden
+        type="file"
+        accept=".multiview,application/json"
+        onChange={(event) => importMultiviewProject(event.target.files?.[0])}
+      />
+
+      <div className="blenderInfoBar studioInfoBar">
         <span><Camera size={13} /> Camera Workspace</span>
         <span>{assetType === "model" ? `3D ${modelFormat.toUpperCase()} → Camera` : "Reference → Target"}</span>
         <span>{lensLabel(lensPreset)} Lens</span>
         <span>Focus {focusBadgeText(focusPoint, focusPosition)}</span>
         <span className={orbitAuto ? "active" : ""}>{orbitAuto ? `Auto Orbit ${orbitAutoSpeed}°/s` : "Orbit Ready"}</span>
+        <div className="studioExportActions">
+          <button type="button" onClick={exportCameraJson}><Download size={12} /> Camera JSON</button>
+          <button type="button" onClick={exportViewportScreenshot} disabled={assetType !== "model" || modelLoadState.status !== "ready"}><Camera size={12} /> Screenshot</button>
+          {lastSavedAt && <small>Saved {new Date(lastSavedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small>}
+        </div>
       </div>
 
       <section className="workspace blenderWorkspace">
@@ -1461,6 +1818,28 @@ function App() {
             </div>
           )}
 
+          <div className="savedProjectsPanel">
+            <div className="savedProjectsHead">
+              <div><strong>Saved projects</strong><small>Camera Studio settings are saved locally in this browser.</small></div>
+              <button type="button" onClick={saveProjectLocally}><Save size={12} /> Save current</button>
+            </div>
+            {savedProjects.length ? (
+              <div className="savedProjectsList">
+                {savedProjects.slice(0, 5).map((item) => (
+                  <div className="savedProjectRow" key={item.id}>
+                    <button type="button" className="savedProjectOpen" onClick={() => applyProjectSnapshot(item.snapshot, `Saved project “${item.name}”`)}>
+                      <strong>{item.name}</strong>
+                      <small>{item.assetName} · {new Date(item.savedAt).toLocaleDateString()}</small>
+                    </button>
+                    <button type="button" className="savedProjectDelete" onClick={() => deleteSavedProject(item.id)} aria-label={`Delete ${item.name}`}><Trash2 size={12} /></button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="savedProjectsEmpty">No saved Camera Studio projects yet.</div>
+            )}
+          </div>
+
           {assetType === "model" ? (
             <div className="modelReferenceInfo">
               <div className="modelReferenceIcon"><Rotate3d size={16} /></div>
@@ -1664,24 +2043,28 @@ function App() {
                     </div>
 
                     {assetType === "model" ? (
-                      <ThreeModelViewport
-                        mainFile={file}
-                        files={fileBundle}
-                        cameraState={camera}
-                        lensPreset={lensPreset}
-                        focusPosition={focusPosition}
-                        projectionMode={viewportProjection}
-                        shadingMode={viewportShading}
-                        showGrid={viewportGrid}
-                        showGround={viewportGround}
-                        resetTransformSignal={modelTransformResetSignal}
-                        className="stageThreeModelViewer"
-                        onModelInfo={setModelInfo}
-                        onLoadState={setModelLoadState}
-                        onSelectionChange={setSelectedModelObject}
-                        onCameraStateChange={handleModelCameraChange}
-                        onError={(message) => setError(`3D model: ${message}`)}
-                      />
+                      <Suspense fallback={<div className="threeLazyFallback">Loading 3D engine…</div>}>
+                        <ThreeModelViewport
+                          ref={threeViewportRef}
+                          mainFile={file}
+                          files={fileBundle}
+                          cameraState={camera}
+                          lensPreset={lensPreset}
+                          focusPosition={focusPosition}
+                          projectionMode={viewportProjection}
+                          shadingMode={viewportShading}
+                          showGrid={viewportGrid}
+                          showGround={viewportGround}
+                          modelTransform={modelTransform}
+                          resetTransformSignal={modelTransformResetSignal}
+                          className="stageThreeModelViewer"
+                          onModelInfo={setModelInfo}
+                          onLoadState={setModelLoadState}
+                          onSelectionChange={setSelectedModelObject}
+                          onCameraStateChange={handleModelCameraChange}
+                          onError={(message) => setError(`3D model: ${message}`)}
+                        />
+                      </Suspense>
                     ) : (
                       <div className="cameraPreview3d proPreview3d editorPreview3d" aria-hidden="true">
                         <div
@@ -1792,9 +2175,46 @@ function App() {
 
                       <div className="viewportSelectionRow">
                         <div><small>Selected object</small><strong>{selectedModelObject?.name || "None"}</strong></div>
-                        <button type="button" onClick={() => setModelTransformResetSignal((value) => value + 1)}>Reset model transform</button>
+                        <button type="button" onClick={resetModelTransform}>Reset model transform</button>
                       </div>
                       <p className="viewportHelpText">Left drag: orbit · Shift + left drag: pan · Wheel: dolly · Click a mesh: select</p>
+                    </section>
+                  )}
+
+                  {assetType === "model" && (
+                    <section className="cameraControlSection objectTransformSection">
+                      <div className="cameraControlSectionHead">
+                        <div><strong>Object Transform</strong><small>Transform the imported model without changing its source file.</small></div>
+                        <button type="button" className="miniResetButton" onClick={resetModelTransform}>Reset</button>
+                      </div>
+
+                      {["position", "rotation", "scale"].map((group) => (
+                        <div className="transformGroup" key={group}>
+                          <span className="transformGroupLabel">{group === "position" ? "Position" : group === "rotation" ? "Rotation" : "Scale"}</span>
+                          <div className="transformAxisGrid">
+                            {["x", "y", "z"].map((axis) => (
+                              <label key={`${group}-${axis}`}>
+                                <b>{axis.toUpperCase()}</b>
+                                <input
+                                  type="number"
+                                  step={group === "rotation" ? "1" : group === "scale" ? "0.01" : "0.05"}
+                                  value={modelTransform[group][axis]}
+                                  onChange={(event) => updateModelTransform(group, axis, event.target.value)}
+                                />
+                                <i>{group === "rotation" ? "°" : group === "scale" ? "×" : "u"}</i>
+                              </label>
+                            ))}
+                          </div>
+                          {group === "scale" && (
+                            <div className="uniformScaleRow">
+                              <span>Uniform</span>
+                              {[0.5, 1, 1.5, 2].map((value) => (
+                                <button type="button" key={value} onClick={() => setUniformModelScale(value)}>{value}×</button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
                     </section>
                   )}
 
@@ -2070,18 +2490,19 @@ function App() {
 
       <div className="blenderStatusBar" role="status">
         <div className="blenderStatusLeft">
-          <span><b>Camera</b></span>
+          <span><b>{safeProjectName(projectName)}</b></span>
           <span>Az {Math.round(camera.azimuth)}°</span>
           <span>El {Math.round(camera.elevation)}°</span>
           <span>Dist {Math.round(camera.distance)}%</span>
           <span>{lensLabel(lensPreset)}</span>
-          <span>Focus {focusBadgeText(focusPoint, focusPosition)}</span>
+          <span>{assetType === "model" ? viewportProjection === "orthographic" ? "Ortho" : "Perspective" : `Focus ${focusBadgeText(focusPoint, focusPosition)}`}</span>
         </div>
         <div className="blenderStatusRight">
-          <span>LMB Drag Orbit</span>
-          <span>Wheel Zoom</span>
-          <span>Shift Precision</span>
-          <span>Space Loop</span>
+          {assetType === "model" ? (
+            <><span>LMB Orbit</span><span>Shift+LMB Pan</span><span>Wheel Dolly</span><span>Click Select</span></>
+          ) : (
+            <><span>LMB Drag Orbit</span><span>Wheel Zoom</span><span>Shift Precision</span><span>Space Loop</span></>
+          )}
         </div>
       </div>
 
@@ -2162,6 +2583,16 @@ function App() {
                       );
                     })()}
                   </div>
+                  {result.assetType === "model" && result.modelTransform && (
+                    <div className="resultTransformCard">
+                      <small>Object transform</small>
+                      <div>
+                        <span>P {result.modelTransform.position.x.toFixed(2)}, {result.modelTransform.position.y.toFixed(2)}, {result.modelTransform.position.z.toFixed(2)}</span>
+                        <span>R {result.modelTransform.rotation.x.toFixed(0)}°, {result.modelTransform.rotation.y.toFixed(0)}°, {result.modelTransform.rotation.z.toFixed(0)}°</span>
+                        <span>S {result.modelTransform.scale.x.toFixed(2)}, {result.modelTransform.scale.y.toFixed(2)}, {result.modelTransform.scale.z.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  )}
                   <div className="promptMetaBar">
                     <span>{lensLabel(result.lensPreset || lensPreset)} lens</span>
                     <span>Focus: {focusBadgeText(result.focusPoint || focusPoint, result.focusPosition || focusPosition)}</span>

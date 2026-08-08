@@ -1160,3 +1160,243 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 1px s
     grid-column: 1 / -1;
   }
 }
+
+/* =========================================================
+   V8.0 CAMERA STUDIO
+   Project workflow, object transform, export tools
+   ========================================================= */
+.projectMenus { gap: 0; }
+.projectMenus button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.studioProjectIdentity {
+  min-width: 0;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.projectNameInput {
+  width: min(260px, 34vw);
+  min-width: 120px;
+  height: 20px;
+  padding: 2px 7px;
+  border: 1px solid #454545;
+  border-radius: 2px;
+  background: #232323;
+  color: #dedede;
+  outline: none;
+  font-size: 8px;
+  font-weight: 600;
+}
+.projectNameInput:focus {
+  border-color: #5f8fc9;
+  box-shadow: 0 0 0 1px rgba(95,143,201,.24);
+}
+
+.studioInfoBar {
+  justify-content: flex-start;
+}
+.studioExportActions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 6px;
+}
+.studioExportActions button {
+  min-height: 20px;
+  padding: 3px 7px;
+  border: 1px solid #3f3f3f;
+  border-radius: 2px;
+  background: #303030;
+  color: #bfc6ce;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 7px;
+  cursor: pointer;
+}
+.studioExportActions button:hover:not(:disabled) { background: #3b3b3b; color: #fff; }
+.studioExportActions button:disabled { opacity: .42; cursor: default; }
+.studioExportActions small { color: #7f8790; font-size: 6.6px; white-space: nowrap; }
+
+.savedProjectsPanel {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid #3a3a3a;
+  background: #262626;
+}
+.savedProjectsHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.savedProjectsHead > div { min-width: 0; display: grid; gap: 2px; }
+.savedProjectsHead strong { color: #d4d4d4; font-size: 7.7px; }
+.savedProjectsHead small { color: #747b84; font-size: 6.3px; line-height: 1.35; }
+.savedProjectsHead button {
+  flex: 0 0 auto;
+  padding: 4px 6px;
+  border: 1px solid #454545;
+  border-radius: 2px;
+  background: #303030;
+  color: #bfc7d0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 6.5px;
+  cursor: pointer;
+}
+.savedProjectsList { display: grid; gap: 4px; }
+.savedProjectRow {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0,1fr) 25px;
+  border: 1px solid #353535;
+  background: #222;
+}
+.savedProjectOpen {
+  min-width: 0;
+  padding: 6px 7px;
+  border: 0;
+  background: transparent;
+  color: #cfd3d8;
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  cursor: pointer;
+}
+.savedProjectOpen:hover { background: #2b2b2b; }
+.savedProjectOpen strong { overflow: hidden; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+.savedProjectOpen small { overflow: hidden; color: #717982; font-size: 6px; text-overflow: ellipsis; white-space: nowrap; }
+.savedProjectDelete {
+  border: 0;
+  border-left: 1px solid #353535;
+  background: transparent;
+  color: #777;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.savedProjectDelete:hover { background: #3b2929; color: #d89595; }
+.savedProjectsEmpty { padding: 7px; border: 1px dashed #393939; color: #707780; font-size: 6.4px; text-align: center; }
+
+.objectTransformSection { background: #282828; }
+.miniResetButton {
+  padding: 4px 7px;
+  border: 1px solid #454545;
+  border-radius: 2px;
+  background: #303030;
+  color: #aeb5bc;
+  font-size: 6.4px;
+  cursor: pointer;
+}
+.transformGroup { margin-top: 8px; display: grid; gap: 5px; }
+.transformGroup + .transformGroup { padding-top: 8px; border-top: 1px solid #383838; }
+.transformGroupLabel { color: #8c949d; font-size: 6.4px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.transformAxisGrid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 5px; }
+.transformAxisGrid label {
+  min-width: 0;
+  height: 26px;
+  padding-left: 6px;
+  border: 1px solid #414141;
+  border-radius: 2px;
+  background: #222;
+  display: grid;
+  grid-template-columns: 12px minmax(0,1fr) 12px;
+  align-items: center;
+  gap: 3px;
+}
+.transformAxisGrid b { color: #8aaee0; font-size: 6.3px; }
+.transformAxisGrid input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: #d8d8d8;
+  outline: none;
+  font-size: 7px;
+  text-align: right;
+}
+.transformAxisGrid i { color: #666d75; font-size: 6px; font-style: normal; }
+.uniformScaleRow { display: flex; align-items: center; gap: 4px; }
+.uniformScaleRow > span { margin-right: auto; color: #6f777f; font-size: 6.2px; }
+.uniformScaleRow button {
+  padding: 3px 6px;
+  border: 1px solid #414141;
+  border-radius: 2px;
+  background: #303030;
+  color: #aaa;
+  font-size: 6px;
+  cursor: pointer;
+}
+.uniformScaleRow button:hover { border-color: #5f8fc9; color: #fff; }
+
+@media (max-width: 1180px) {
+  .projectMenus button { padding-inline: 6px; }
+  .projectMenus button svg { display: none; }
+  .projectNameInput { width: 170px; }
+  .studioExportActions small { display: none; }
+}
+
+@media (max-width: 900px) {
+  .studioProjectIdentity > span:first-child { display: none; }
+  .projectNameInput { width: 140px; }
+  .studioExportActions { margin-left: 0; }
+  .studioInfoBar { flex-wrap: wrap; height: auto; min-height: 28px; }
+  .studioExportActions { width: 100%; padding: 3px 6px; border-top: 1px solid #242424; }
+}
+
+@media (max-width: 640px) {
+  .projectMenus button:nth-child(3),
+  .projectMenus button:nth-child(5) { display: none; }
+  .projectNameInput { width: 118px; }
+  .transformAxisGrid { grid-template-columns: 1fr; }
+  .studioExportActions { overflow-x: auto; }
+  .savedProjectsHead { flex-direction: column; }
+}
+
+.resultTransformCard {
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid #dde2e7;
+  border-radius: 3px;
+  background: #f7f8fa;
+  display: grid;
+  gap: 6px;
+}
+.resultTransformCard > small {
+  color: #68727d;
+  font-size: 6.7px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.resultTransformCard > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.resultTransformCard span {
+  padding: 4px 6px;
+  border: 1px solid #e1e5e9;
+  border-radius: 2px;
+  background: #fff;
+  color: #39434d;
+  font-size: 6.7px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+
+/* V8.0.1 lazy 3D engine */
+.threeLazyFallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #1e1f20;
+  color: #aeb4bc;
+  font-size: 12px;
+  letter-spacing: .02em;
+}
