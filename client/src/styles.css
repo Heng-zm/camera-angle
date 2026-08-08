@@ -1400,3 +1400,187 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 1px s
   font-size: 12px;
   letter-spacing: .02em;
 }
+
+/* ========================================================================== */
+/* V8.9 Production Studio — Outliner / Performance / Material / Lighting / Export */
+/* ========================================================================== */
+.perfInfoChip { display:inline-flex; align-items:center; gap:5px; color:#b7c5d6!important; }
+.studioExportActions button.active { background:#365f91; color:#fff; border-color:#5d8fc8; }
+
+.viewportErrorBoundary { position:absolute; inset:14px; z-index:30; display:grid; place-content:center; gap:8px; padding:22px; text-align:center; border:1px solid #743c3c; border-radius:6px; background:rgba(35,19,19,.96); color:#f0dada; }
+.viewportErrorBoundary strong { font-size:12px; }
+.viewportErrorBoundary p { margin:0; max-width:460px; color:#caa; font-size:10px; line-height:1.5; }
+.viewportErrorBoundary button { justify-self:center; min-height:30px; padding:0 12px; border:1px solid #8f5555; border-radius:4px; background:#5b2d2d; color:#fff; font-size:10px; cursor:pointer; }
+
+.viewportDebugPanel { position:absolute; left:12px; bottom:44px; z-index:12; width:190px; padding:8px; border:1px solid #4e535c; border-radius:5px; background:rgba(26,28,32,.92); box-shadow:0 8px 24px rgba(0,0,0,.25); pointer-events:none; }
+.viewportDebugPanel div { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:3px 2px; font-size:9px; }
+.viewportDebugPanel span { color:#8f98a6; }
+.viewportDebugPanel b { color:#d8dee8; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-weight:600; }
+
+.sceneOutlinerPanel { margin-top:10px; border:1px solid #42464d; border-radius:5px; overflow:hidden; background:#24262a; color:#d7d9dd; }
+.sceneOutlinerHead { min-height:38px; padding:7px 8px; display:flex; align-items:center; justify-content:space-between; gap:8px; border-bottom:1px solid #3c4046; background:#2b2e33; }
+.sceneOutlinerHead>div:first-child { min-width:0; display:grid; gap:2px; }
+.sceneOutlinerHead strong { font-size:10px; }
+.sceneOutlinerHead small { color:#858d99; font-size:8px; }
+.sceneOutlinerHeadActions { display:flex; gap:4px; }
+.sceneOutlinerHeadActions button { width:27px; height:25px; display:grid; place-items:center; border:1px solid #454a51; border-radius:3px; background:#33363b; color:#c8cdd5; cursor:pointer; font-size:9px; }
+.sceneOutlinerHeadActions button:disabled { opacity:.35; cursor:not-allowed; }
+.outlinerSearchBox { margin:7px; height:30px; padding:0 8px; display:flex; align-items:center; gap:6px; border:1px solid #444951; border-radius:4px; background:#1f2124; color:#9098a5; }
+.outlinerSearchBox input { min-width:0; width:100%; border:0; outline:0; background:transparent; color:#dddfe3; font-size:9px; }
+.sceneOutlinerTree { max-height:270px; overflow:auto; padding:3px 0; border-top:1px solid #34383e; border-bottom:1px solid #34383e; }
+.outlinerNode { min-height:25px; padding-right:5px; display:flex; align-items:center; gap:6px; color:#c8cdd5; cursor:default; user-select:none; }
+.outlinerNode:hover { background:#30343a; }
+.outlinerNode.selected { background:#3b638f; color:#fff; }
+.outlinerNode.special { color:#aeb5bf; }
+.outlinerTypeIcon { width:16px; display:grid; place-items:center; color:#a4afbc; }
+.outlinerNode.selected .outlinerTypeIcon { color:#fff; }
+.outlinerNodeName { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:9px; }
+.outlinerActions { display:flex; gap:2px; opacity:.25; }
+.outlinerNode:hover .outlinerActions,.outlinerNode.selected .outlinerActions { opacity:1; }
+.outlinerActions button { width:20px; height:20px; display:grid; place-items:center; border:0; border-radius:3px; background:transparent; color:inherit; cursor:pointer; }
+.outlinerActions button:hover { background:rgba(255,255,255,.1); }
+.outlinerFooterActions { padding:6px; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px; }
+.outlinerFooterActions button { min-height:28px; border:1px solid #444950; border-radius:3px; background:#31343a; color:#c8cdd5; display:flex; align-items:center; justify-content:center; gap:5px; font-size:8px; cursor:pointer; }
+.outlinerFooterActions button:disabled { opacity:.35; cursor:not-allowed; }
+.outlinerEmpty { padding:18px 10px; color:#767e89; text-align:center; font-size:8.5px; }
+.selectedObjectStats { padding:7px; display:grid; grid-template-columns:minmax(0,1.5fr) repeat(2,minmax(0,1fr)); gap:5px; border-top:1px solid #383c42; }
+.selectedObjectStats span { min-width:0; padding:6px; border-radius:3px; background:#1f2125; display:grid; gap:2px; }
+.selectedObjectStats b { overflow:hidden; color:#d9dde3; font-size:8.5px; text-overflow:ellipsis; white-space:nowrap; }
+.selectedObjectStats small { color:#747e8c; font-size:7px; }
+
+.viewportSegmented.quality { grid-template-columns:repeat(5,minmax(0,1fr)); }
+.viewportSegmented.quality button { padding-inline:3px; font-size:7.4px; text-transform:capitalize; }
+
+.studioModuleSection { padding:0!important; overflow:hidden; }
+.studioModuleSection>summary { list-style:none; min-height:44px; padding:9px 10px; display:flex; align-items:center; gap:8px; cursor:pointer; background:#2b2e33; border-bottom:1px solid transparent; }
+.studioModuleSection[open]>summary { border-bottom-color:#40444b; }
+.studioModuleSection>summary::-webkit-details-marker { display:none; }
+.studioModuleSection>summary>span { flex:1; min-width:0; display:grid; gap:2px; }
+.studioModuleSection>summary b { color:#d9dde3; font-size:9.5px; }
+.studioModuleSection>summary small { color:#858e9b; font-size:7.7px; }
+.studioModuleSection>summary>svg:last-child { transition:transform .15s ease; }
+.studioModuleSection[open]>summary>svg:last-child { transform:rotate(180deg); }
+.studioModuleBody { padding:9px; display:grid; gap:9px; background:#25282c; }
+.studioModuleEmpty { padding:18px 10px; text-align:center; color:#7e8793; font-size:8.5px; line-height:1.5; }
+
+.materialSlotList { display:grid; gap:4px; max-height:150px; overflow:auto; }
+.materialSlotList button { min-height:38px; padding:5px 7px; display:grid; grid-template-columns:24px minmax(0,1fr); align-items:center; gap:7px; border:1px solid #3f444b; border-radius:4px; background:#2d3035; color:#cdd2d9; text-align:left; cursor:pointer; }
+.materialSlotList button.active { border-color:#568bc5; background:#334a64; }
+.materialSwatch { width:22px; height:22px; border-radius:3px; border:1px solid rgba(255,255,255,.2); }
+.materialSlotList button span:last-child { min-width:0; display:grid; gap:2px; }
+.materialSlotList b { font-size:8.6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.materialSlotList small { color:#88919d; font-size:7px; }
+.materialEditorGrid { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
+.materialEditorGrid>label { min-height:34px; padding:6px; border:1px solid #3e434a; border-radius:4px; background:#2d3035; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.materialEditorGrid>label>span { color:#9ca5b1; font-size:7.5px; }
+.materialEditorGrid input[type="color"] { width:32px; height:23px; padding:0; border:1px solid #525862; border-radius:3px; background:transparent; }
+.materialEditorGrid .materialRange { grid-column:1/-1; display:grid; grid-template-columns:110px minmax(0,1fr); }
+.materialRange span { display:flex; justify-content:space-between; }
+.materialRange input { width:100%; }
+.materialEditorGrid>button { min-height:32px; border:1px solid #444951; border-radius:4px; background:#30343a; color:#c7cdd5; font-size:8px; cursor:pointer; }
+.materialEditorGrid>button.toggleActive { border-color:#4d82b9; background:#355778; color:#fff; }
+.materialTextureActions { grid-column:1/-1; display:grid; grid-template-columns:1fr 1fr; gap:5px; }
+.materialTextureActions button { min-height:30px; border:1px solid #444951; border-radius:4px; background:#30343a; color:#c8ced6; display:flex; align-items:center; justify-content:center; gap:5px; font-size:8px; cursor:pointer; }
+.materialTextureActions button:disabled { opacity:.35; }
+.materialTextureMeta { grid-column:1/-1; color:#737d89; font-size:7.3px; }
+
+.lightingPresetGrid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; }
+.lightingPresetGrid button { min-height:45px; padding:6px 8px; border:1px solid #41464d; border-radius:4px; background:#2d3035; color:#cbd0d7; display:grid; gap:2px; text-align:left; cursor:pointer; }
+.lightingPresetGrid button.active { border-color:#568bc5; background:#334a64; color:#fff; }
+.lightingPresetGrid b { font-size:8.3px; }
+.lightingPresetGrid small { color:#88919d; font-size:6.8px; }
+.customEnvironmentRow { padding:6px; border:1px solid #41464d; border-radius:4px; background:#2d3035; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.customEnvironmentRow span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#aeb6c1; font-size:7.5px; }
+.customEnvironmentRow button { min-height:27px; border:1px solid #4b515a; border-radius:3px; background:#373b41; color:#d4d8de; font-size:7.5px; cursor:pointer; }
+.lightingSlider { display:grid; gap:5px; }
+.lightingSlider>span { display:flex; align-items:center; justify-content:space-between; color:#929ba7; font-size:7.6px; }
+.lightingSlider b { color:#d5d9df; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
+.lightingSlider input { width:100%; }
+.lightingIntensityGrid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; }
+.lightingIntensityGrid label { padding:6px; border:1px solid #3f444a; border-radius:4px; background:#2d3035; display:grid; gap:4px; }
+.lightingIntensityGrid span { color:#8d96a2; font-size:7px; }
+.lightingIntensityGrid input { width:100%; min-height:27px; padding:0 6px; border:1px solid #4a5058; border-radius:3px; background:#202226; color:#d7dbe1; font-size:8px; }
+.lightingToggleGrid { display:grid; grid-template-columns:1fr 1fr; gap:5px; }
+.lightingToggleGrid button { min-height:30px; border:1px solid #444951; border-radius:4px; background:#30343a; color:#aeb6c0; font-size:7.6px; cursor:pointer; }
+.lightingToggleGrid button.active { border-color:#4f82b8; background:#355778; color:#fff; }
+
+.exportFormatGrid { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; }
+.exportScaleGrid { display:grid; grid-template-columns:repeat(4,1fr); gap:4px; }
+.exportFormatGrid button,.exportScaleGrid button { min-height:29px; border:1px solid #43484f; border-radius:3px; background:#303339; color:#b8c0ca; font-size:7.8px; cursor:pointer; }
+.exportFormatGrid button.active,.exportScaleGrid button.active { border-color:#568bc5; background:#355778; color:#fff; }
+.exportCustomSize { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:6px; }
+.exportCustomSize label { min-height:30px; padding:0 6px; border:1px solid #42474e; border-radius:3px; background:#2e3136; display:flex; align-items:center; gap:5px; }
+.exportCustomSize label span { color:#7e8793; font-size:7px; }
+.exportCustomSize input { min-width:0; width:100%; border:0; outline:0; background:transparent; color:#ddd; font-size:8px; }
+.exportTransparent { min-height:29px; border:1px solid #434850; border-radius:3px; background:#303339; color:#aeb5be; font-size:7.8px; cursor:pointer; }
+.exportTransparent.active { border-color:#4e83ba; background:#355778; color:#fff; }
+.exportTransparent:disabled { opacity:.35; }
+.exportPrimaryButton { min-height:34px; border:1px solid #568bc5; border-radius:4px; background:#3e70a4; color:#fff; display:flex; align-items:center; justify-content:center; gap:6px; font-size:8.5px; font-weight:700; cursor:pointer; }
+.exportDataGrid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; }
+.exportDataGrid button { min-height:31px; border:1px solid #42474e; border-radius:3px; background:#303339; color:#c2c8d0; display:flex; align-items:center; justify-content:center; gap:5px; font-size:7.5px; cursor:pointer; }
+.savedCameraPanel { padding-top:7px; border-top:1px solid #3c4147; display:grid; gap:5px; }
+.savedCameraHead { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.savedCameraHead strong { color:#cfd4db; font-size:8px; }
+.savedCameraHead button,.batchExportButton { min-height:27px; border:1px solid #454b53; border-radius:3px; background:#33373d; color:#c4cad2; display:flex; align-items:center; justify-content:center; gap:5px; font-size:7.4px; cursor:pointer; }
+.savedCameraRow { display:grid; grid-template-columns:minmax(0,1fr) 27px; gap:4px; }
+.savedCameraRow>button:first-child { min-width:0; padding:5px 7px; border:1px solid #3e434a; border-radius:3px; background:#2c2f34; color:#ccd1d8; display:grid; gap:2px; text-align:left; cursor:pointer; }
+.savedCameraRow b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:7.8px; }
+.savedCameraRow small { color:#7e8793; font-size:6.7px; }
+.savedCameraRow>button:last-child { border:1px solid #493f41; border-radius:3px; background:#342d2f; color:#c9949b; display:grid; place-items:center; cursor:pointer; }
+.savedCameraEmpty { color:#747d88; font-size:7.4px; }
+.batchExportButton:disabled { opacity:.35; cursor:not-allowed; }
+
+.threeSelectionBadge { max-width:60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+@media (max-width: 1120px) {
+  .sceneOutlinerTree { max-height:220px; }
+  .materialEditorGrid { grid-template-columns:1fr; }
+  .materialEditorGrid .materialRange,.materialTextureActions,.materialTextureMeta { grid-column:1; }
+  .lightingPresetGrid { grid-template-columns:1fr; }
+  .viewportSegmented.quality { grid-template-columns:repeat(3,minmax(0,1fr)); }
+}
+
+@media (max-width: 720px) {
+  .viewportDebugPanel { left:8px; bottom:56px; width:160px; }
+  .sceneOutlinerTree { max-height:200px; }
+  .lightingIntensityGrid,.lightingToggleGrid,.exportDataGrid { grid-template-columns:1fr; }
+  .exportScaleGrid { grid-template-columns:repeat(2,1fr); }
+}
+
+/* V8.9 Material Studio texture slots */
+.materialTextureStudio { grid-column:1/-1; display:grid; gap:5px; padding-top:3px; }
+.materialTextureStudioHead { display:flex; align-items:flex-end; justify-content:space-between; gap:8px; }
+.materialTextureStudioHead span { color:#cfd4db; font-size:8px; font-weight:700; }
+.materialTextureStudioHead small { color:#727c88; font-size:6.8px; }
+.materialTextureSlot { min-height:38px; display:grid; grid-template-columns:30px minmax(0,1fr) auto 25px; align-items:center; gap:6px; padding:4px 5px; border:1px dashed #41474f; border-radius:4px; background:#292c31; }
+.materialTextureSlot.attached { border-style:solid; border-color:#4c6680; background:#2b333c; }
+.materialTexturePreview { width:30px; height:30px; overflow:hidden; display:grid; place-items:center; border:1px solid #464c54; border-radius:3px; background:#202226; color:#7f8a96; }
+.materialTexturePreview img { width:100%; height:100%; object-fit:cover; }
+.materialTextureName { min-width:0; display:grid; gap:2px; }
+.materialTextureName b { color:#cbd1d8; font-size:7.8px; }
+.materialTextureName small { overflow:hidden; color:#77828e; font-size:6.6px; text-overflow:ellipsis; white-space:nowrap; }
+.materialTextureSlot>button { min-height:25px; padding:0 7px; border:1px solid #464c54; border-radius:3px; background:#34383e; color:#c6ccd3; font-size:7px; cursor:pointer; }
+.materialTextureSlot>button:hover:not(:disabled) { border-color:#5b86b6; background:#3b4652; }
+.materialTextureSlot .textureRemoveButton { width:25px; padding:0; display:grid; place-items:center; color:#c9949b; }
+.materialTextureSlot .textureRemoveButton:disabled { opacity:.25; cursor:not-allowed; }
+.missingAssetBox { display:grid; gap:6px; padding:7px; border:1px solid #665346; border-radius:4px; background:#342d28; }
+.missingAssetBox>div { display:grid; gap:2px; }
+.missingAssetBox strong { color:#e2c7ae; font-size:8px; }
+.missingAssetBox small { color:#a58d78; font-size:6.8px; }
+.missingAssetBox ul { max-height:78px; overflow:auto; margin:0; padding:0 0 0 16px; color:#c7ad96; font-size:7px; line-height:1.55; }
+.missingAssetBox button { min-height:28px; border:1px solid #715e4d; border-radius:3px; background:#41362d; color:#dec5ac; display:flex; align-items:center; justify-content:center; gap:5px; font-size:7.3px; cursor:pointer; }
+.materialUvWarning { padding:6px 7px; border-left:2px solid #c58a4e; background:#332e28; color:#bca58c; font-size:7px; line-height:1.45; }
+
+@media (max-width: 720px) {
+  .materialTextureSlot { grid-template-columns:30px minmax(0,1fr) auto; }
+  .materialTextureSlot .textureRemoveButton { grid-column:3; }
+  .materialTextureStudioHead { align-items:flex-start; flex-direction:column; gap:2px; }
+}
+
+/* Large-scene Outliner guards */
+.outlinerDisclosure { width:14px; height:18px; flex:0 0 14px; padding:0; border:0; background:transparent; color:#8f99a6; display:grid; place-items:center; font-size:9px; line-height:1; cursor:default; }
+.outlinerDisclosure.hasChildren { cursor:pointer; }
+.outlinerDisclosure.hasChildren:hover { color:#e1e5ea; }
+.outlinerLimitNote { padding:6px 7px; border-bottom:1px solid #34383e; background:#24272b; color:#8b96a3; font-size:6.9px; line-height:1.45; }
+.viewportDebugPanel .debugWide { grid-column:1/-1; }
+.viewportDebugPanel .debugWide b { max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

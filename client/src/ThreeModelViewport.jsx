@@ -1,20 +1,31 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
-import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
-import { STLLoader } from "three/addons/loaders/STLLoader.js";
-import { PLYLoader } from "three/addons/loaders/PLYLoader.js";
-import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
-import { ColladaLoader } from "three/addons/loaders/ColladaLoader.js";
-import { ThreeMFLoader } from "three/addons/loaders/3MFLoader.js";
-import { TDSLoader } from "three/addons/loaders/TDSLoader.js";
-import { TGALoader } from "three/addons/loaders/TGALoader.js";
-import { DDSLoader } from "three/addons/loaders/DDSLoader.js";
+
 
 const MODEL_EXTENSIONS = new Set(["obj", "stl", "ply", "glb", "gltf", "fbx", "dae", "3mf", "3ds"]);
-const TEXTURE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "tga", "dds", "gif"]);
+const TEXTURE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "tga", "dds", "gif", "ktx2"]);
+const WORKER_FORMATS = new Set(["obj", "stl", "ply"]);
+const WORKER_THRESHOLD_BYTES = 4 * 1024 * 1024;
+const LOCAL_DECODER_ROOT = "/three-decoders";
+
+const loaderImports = {
+  obj: () => import("three/addons/loaders/OBJLoader.js"),
+  mtl: () => import("three/addons/loaders/MTLLoader.js"),
+  stl: () => import("three/addons/loaders/STLLoader.js"),
+  ply: () => import("three/addons/loaders/PLYLoader.js"),
+  gltf: () => import("three/addons/loaders/GLTFLoader.js"),
+  fbx: () => import("three/addons/loaders/FBXLoader.js"),
+  dae: () => import("three/addons/loaders/ColladaLoader.js"),
+  "3mf": () => import("three/addons/loaders/3MFLoader.js"),
+  "3ds": () => import("three/addons/loaders/TDSLoader.js"),
+  tga: () => import("three/addons/loaders/TGALoader.js"),
+  dds: () => import("three/addons/loaders/DDSLoader.js"),
+  draco: () => import("three/addons/loaders/DRACOLoader.js"),
+  ktx2: () => import("three/addons/loaders/KTX2Loader.js"),
+  hdr: () => import("three/addons/loaders/HDRLoader.js"),
+  exr: () => import("three/addons/loaders/EXRLoader.js"),
+};
 
 function extensionOf(name = "") {
   return name.toLowerCase().split(".").pop() || "";
@@ -49,6 +60,18 @@ function formatBytes(bytes = 0) {
 
 function safeFileLabel(file) {
   return file?.webkitRelativePath || file?.name || "unknown file";
+}
+
+async function readTextSample(file, maxBytes = 4 * 1024 * 1024, includeTail = false) {
+  if (!file) return "";
+  if (file.size <= maxBytes) return file.text();
+  const headBytes = includeTail ? Math.floor(maxBytes * 0.75) : maxBytes;
+  const head = await file.slice(0, headBytes).text();
+  if (!includeTail) return head;
+  const tailBytes = Math.max(0, maxBytes - headBytes);
+  const tail = tailBytes ? await file.slice(Math.max(0, file.size - tailBytes), file.size).text() : "";
+  return `${head}
+${tail}`;
 }
 
 function parseMtlTextureRefs(text = "") {
@@ -117,13 +140,14 @@ async function analyzeDependencies(mainFile, files) {
 
   try {
     if (ext === "obj") {
-      const objText = await mainFile.text();
+      const objText = await readTextSample(mainFile, 2 * 1024 * 1024, false);
       const mtls = [...objText.matchAll(/^\s*mtllib\s+(.+)$/gim)].map((match) => match[1].trim());
+      if (mainFile.size > 2 * 1024 * 1024) notes.push("Large OBJ dependency scan used a lightweight header sample to avoid blocking the UI.");
       mtls.forEach((value) => addRequired(value, "material"));
 
       const mtlFiles = files.filter((file) => extensionOf(file.name) === "mtl");
       for (const mtlFile of mtlFiles) {
-        const mtlText = await mtlFile.text();
+        const mtlText = await readTextSample(mtlFile, 16 * 1024 * 1024, true);
         parseMtlTextureRefs(mtlText).forEach((value) => addRequired(value, "texture"));
       }
       if (!mtls.length && !mtlFiles.length) notes.push("OBJ has no MTL file; default viewport material will be used.");
@@ -132,8 +156,9 @@ async function analyzeDependencies(mainFile, files) {
       (json.buffers || []).forEach((item) => addRequired(item?.uri, "buffer"));
       (json.images || []).forEach((item) => addRequired(item?.uri, "texture"));
     } else if (ext === "dae") {
-      const text = await mainFile.text();
+      const text = await readTextSample(mainFile, 8 * 1024 * 1024, true);
       const refs = [...text.matchAll(/<init_from>\s*([^<]+?)\s*<\/init_from>/gi)].map((match) => match[1]);
+      if (mainFile.size > 8 * 1024 * 1024) notes.push("Large DAE dependency scan used sampled metadata to protect UI responsiveness.");
       refs.forEach((value) => addRequired(value, "texture"));
     } else if (["fbx", "3ds", "3mf"].includes(ext)) {
       notes.push(`${ext.toUpperCase()} can contain embedded resources; external texture references are resolved when matching local files are supplied.`);
@@ -177,13 +202,83 @@ function disposeMaterial(material) {
 }
 
 function disposeObject(object) {
+  const seenGeometry = new Set();
+  const seenMaterial = new Set();
+  const seenTexture = new Set();
+  const disposeMaterialOnce = (candidate) => {
+    const materials = Array.isArray(candidate) ? candidate : candidate ? [candidate] : [];
+    for (const material of materials) {
+      if (!material || seenMaterial.has(material)) continue;
+      seenMaterial.add(material);
+      for (const key of Object.keys(material)) {
+        const texture = material[key];
+        if (texture?.isTexture && !seenTexture.has(texture)) {
+          seenTexture.add(texture);
+          texture.dispose?.();
+        }
+      }
+      material.dispose?.();
+    }
+  };
   object?.traverse?.((node) => {
-    node.geometry?.dispose?.();
-    const original = node.userData?.originalViewportMaterial;
-    if (original && original !== node.material) disposeMaterial(original);
-    disposeMaterial(node.userData?.generatedViewportMaterial);
-    if (!node.userData?.generatedViewportMaterial || node.material !== node.userData.generatedViewportMaterial) {
-      disposeMaterial(node.material);
+    if (node.geometry && !seenGeometry.has(node.geometry)) {
+      seenGeometry.add(node.geometry);
+      node.geometry.dispose?.();
+    }
+    disposeMaterialOnce(node.userData?.originalViewportMaterial);
+    disposeMaterialOnce(node.userData?.generatedViewportMaterial);
+    disposeMaterialOnce(node.material);
+  });
+}
+
+function collectResourceRefs(root, excludedRoot = null) {
+  const geometries = new Set();
+  const materials = new Set();
+  const textures = new Set();
+  root?.traverse?.((node) => {
+    if (excludedRoot && (node === excludedRoot || excludedRoot.getObjectById?.(node.id))) return;
+    if (node.geometry) geometries.add(node.geometry);
+    const candidates = [node.material, node.userData?.originalViewportMaterial, node.userData?.generatedViewportMaterial];
+    for (const candidate of candidates) {
+      const list = Array.isArray(candidate) ? candidate : candidate ? [candidate] : [];
+      for (const material of list) {
+        if (!material) continue;
+        materials.add(material);
+        for (const key of Object.keys(material)) {
+          const texture = material[key];
+          if (texture?.isTexture) textures.add(texture);
+        }
+      }
+    }
+  });
+  return { geometries, materials, textures };
+}
+
+function disposeDetachedObject(object, remainingRoot) {
+  const preserved = collectResourceRefs(remainingRoot, object);
+  const disposedGeometry = new Set();
+  const disposedMaterial = new Set();
+  const disposedTexture = new Set();
+  object?.traverse?.((node) => {
+    if (node.geometry && !preserved.geometries.has(node.geometry) && !disposedGeometry.has(node.geometry)) {
+      disposedGeometry.add(node.geometry);
+      node.geometry.dispose?.();
+    }
+    const candidates = [node.material, node.userData?.originalViewportMaterial, node.userData?.generatedViewportMaterial];
+    for (const candidate of candidates) {
+      const list = Array.isArray(candidate) ? candidate : candidate ? [candidate] : [];
+      for (const material of list) {
+        if (!material || preserved.materials.has(material) || disposedMaterial.has(material)) continue;
+        disposedMaterial.add(material);
+        for (const key of Object.keys(material)) {
+          const texture = material[key];
+          if (texture?.isTexture && !preserved.textures.has(texture) && !disposedTexture.has(texture)) {
+            disposedTexture.add(texture);
+            texture.dispose?.();
+          }
+        }
+        material.dispose?.();
+      }
     }
   });
 }
@@ -198,7 +293,7 @@ function makeDefaultMaterial(geometry = null) {
   });
 }
 
-function prepareObject(object) {
+async function prepareObject(object, onProgress = null, shouldCancel = null) {
   let meshCount = 0;
   let vertexCount = 0;
   let triangleCount = 0;
@@ -206,9 +301,14 @@ function prepareObject(object) {
   let materialCount = 0;
   let texturedMaterialCount = 0;
   const materialNames = new Set();
+  const uniqueMaterials = new Set();
+  const texturedMaterials = new Set();
   const names = [];
-  object.traverse((node) => {
-    if (!node.isMesh) return;
+  const meshes = [];
+  object.traverse((node) => { if (node.isMesh) meshes.push(node); });
+  for (let meshIndex = 0; meshIndex < meshes.length; meshIndex += 1) {
+    if (shouldCancel?.()) throw new DOMException("Model loading cancelled", "AbortError");
+    const node = meshes[meshIndex];
     meshCount += 1;
     if (!node.name) node.name = `Mesh ${meshCount}`;
     names.push(node.name);
@@ -222,16 +322,26 @@ function prepareObject(object) {
     const materials = Array.isArray(node.material) ? node.material : [node.material];
     for (const material of materials) {
       if (!material) continue;
-      materialCount += 1;
+      const materialKey = material.uuid || material;
+      uniqueMaterials.add(materialKey);
       if (material.name) materialNames.add(material.name);
-      if (material.map || material.normalMap || material.bumpMap || material.roughnessMap || material.metalnessMap || material.alphaMap || material.emissiveMap || material.specularMap) texturedMaterialCount += 1;
+      if (material.map || material.normalMap || material.bumpMap || material.roughnessMap || material.metalnessMap || material.alphaMap || material.emissiveMap || material.specularMap) texturedMaterials.add(materialKey);
       material.side = THREE.DoubleSide;
       material.needsUpdate = true;
     }
     node.userData.originalViewportMaterial = node.material;
     node.castShadow = true;
     node.receiveShadow = true;
-  });
+    if (meshIndex > 0 && meshIndex % 75 === 0) {
+      onProgress?.(meshIndex / Math.max(meshes.length, 1));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      if (shouldCancel?.()) throw new DOMException("Model loading cancelled", "AbortError");
+    }
+  }
+  if (shouldCancel?.()) throw new DOMException("Model loading cancelled", "AbortError");
+  materialCount = uniqueMaterials.size;
+  texturedMaterialCount = texturedMaterials.size;
+  onProgress?.(1);
   return {
     meshCount,
     vertexCount,
@@ -280,6 +390,9 @@ function createReaderTask(active, file, mode) {
       active.readers.delete(reader);
       reject(new DOMException("Model loading cancelled", "AbortError"));
     };
+    reader.onprogress = (event) => {
+      if (event.lengthComputable && active.fileProgress) active.fileProgress(file, event.loaded, event.total);
+    };
     reader.onload = () => {
       active.readers.delete(reader);
       if (active.cancelled) reject(new DOMException("Model loading cancelled", "AbortError"));
@@ -290,79 +403,294 @@ function createReaderTask(active, file, mode) {
   });
 }
 
-async function loadModel(mainFile, files, manager, active, setProgress) {
+
+function typedArrayFrom(spec) {
+  if (!spec?.buffer || !spec?.type) return null;
+  const ctor = {
+    Float32Array, Float64Array, Uint8Array, Uint8ClampedArray, Uint16Array,
+    Uint32Array, Int8Array, Int16Array, Int32Array,
+  }[spec.type];
+  if (!ctor) throw new Error(`Unsupported worker array type: ${spec.type}`);
+  return new ctor(spec.buffer, spec.byteOffset || 0, spec.length);
+}
+
+function materialFromWorker(spec, materialCreator = null) {
+  if (materialCreator && spec?.name) {
+    try {
+      const material = materialCreator.create(spec.name);
+      if (material) {
+        material.side = THREE.DoubleSide;
+        return material;
+      }
+    } catch {
+      // Fall through to a generated material.
+    }
+  }
+  return new THREE.MeshStandardMaterial({
+    name: spec?.name || "",
+    color: spec?.color ?? 0xb8c0ca,
+    emissive: spec?.emissive ?? 0x000000,
+    opacity: Number.isFinite(spec?.opacity) ? spec.opacity : 1,
+    transparent: Boolean(spec?.transparent || (spec?.opacity ?? 1) < 1),
+    roughness: Number.isFinite(spec?.roughness) ? spec.roughness : 0.58,
+    metalness: Number.isFinite(spec?.metalness) ? spec.metalness : 0.05,
+    wireframe: Boolean(spec?.wireframe),
+    vertexColors: Boolean(spec?.vertexColors),
+    side: THREE.DoubleSide,
+  });
+}
+
+async function reconstructWorkerObject(serialized, materialCreator = null, onProgress = null, shouldCancel = null) {
+  let built = 0;
+  let total = 0;
+  const count = (node) => {
+    total += 1;
+    (node?.children || []).forEach(count);
+  };
+  count(serialized);
+
+  const build = async (node) => {
+    if (shouldCancel?.()) throw new DOMException("Model loading cancelled", "AbortError");
+    let object;
+    if (node.type === "Mesh" || node.type === "Points" || node.type === "Line") {
+      const geometry = new THREE.BufferGeometry();
+      for (const [name, attribute] of Object.entries(node.geometry?.attributes || {})) {
+        const array = typedArrayFrom(attribute.array);
+        if (array) geometry.setAttribute(name, new THREE.BufferAttribute(array, attribute.itemSize, attribute.normalized));
+      }
+      if (node.geometry?.index?.array) {
+        const indexArray = typedArrayFrom(node.geometry.index.array);
+        if (indexArray) geometry.setIndex(new THREE.BufferAttribute(indexArray, 1, false));
+      }
+      for (const group of node.geometry?.groups || []) geometry.addGroup(group.start, group.count, group.materialIndex || 0);
+      if (node.geometry?.drawRange) geometry.setDrawRange(node.geometry.drawRange.start || 0, node.geometry.drawRange.count ?? Infinity);
+      if (!geometry.attributes.normal && geometry.attributes.position && node.type === "Mesh") geometry.computeVertexNormals();
+      const mats = (node.materials || []).map((item) => materialFromWorker(item, materialCreator));
+      const material = mats.length > 1 ? mats : (mats[0] || makeDefaultMaterial(geometry));
+      object = node.type === "Points"
+        ? new THREE.Points(geometry, material)
+        : node.type === "Line"
+          ? new THREE.Line(geometry, material)
+          : new THREE.Mesh(geometry, material);
+    } else {
+      object = new THREE.Group();
+    }
+    object.name = node.name || "Object";
+    object.position.fromArray(node.position || [0, 0, 0]);
+    object.quaternion.fromArray(node.quaternion || [0, 0, 0, 1]);
+    object.scale.fromArray(node.scale || [1, 1, 1]);
+    object.visible = node.visible !== false;
+    for (const child of node.children || []) object.add(await build(child));
+    built += 1;
+    if (built % 20 === 0) {
+      onProgress?.(built / Math.max(total, 1));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      if (shouldCancel?.()) throw new DOMException("Model loading cancelled", "AbortError");
+    }
+    return object;
+  };
+  const result = await build(serialized);
+  if (shouldCancel?.()) {
+    disposeObject(result);
+    throw new DOMException("Model loading cancelled", "AbortError");
+  }
+  onProgress?.(1);
+  return result;
+}
+
+async function loadMtlCreator(mainFile, files, manager, active) {
+  const objText = await createReaderTask(active, mainFile, "text");
+  const referencedMtl = objText.match(/^\s*mtllib\s+(.+)$/im)?.[1]?.trim() || "";
+  const mtlFile = findMatchingMtl(mainFile, files, referencedMtl);
+  if (!mtlFile) return { creator: null, referencedMtl, mtlFile: null, objText };
+  const mtlText = await createReaderTask(active, mtlFile, "text");
+  const normalizeRGB = mtlUsesByteRangeColors(mtlText);
+  const { MTLLoader } = await loaderImports.mtl();
+  const creator = new MTLLoader(manager).setMaterialOptions({
+    side: THREE.DoubleSide,
+    wrap: THREE.RepeatWrapping,
+    normalizeRGB,
+    ignoreZeroRGBs: true,
+  }).parse(mtlText, "");
+  creator.preload();
+  return { creator, referencedMtl, mtlFile, objText, normalizeRGB };
+}
+
+async function loadMtlCreatorForWorker(mainFile, files, manager, active) {
+  const headText = await mainFile.slice(0, Math.min(mainFile.size, 2 * 1024 * 1024)).text();
+  if (active.cancelled) throw new DOMException("Model loading cancelled", "AbortError");
+  const referencedMtl = headText.match(/^\s*mtllib\s+(.+)$/im)?.[1]?.trim() || "";
+  const mtlFile = findMatchingMtl(mainFile, files, referencedMtl);
+  if (!mtlFile) return { creator: null, referencedMtl, mtlFile: null };
+  const mtlText = await createReaderTask(active, mtlFile, "text");
+  const normalizeRGB = mtlUsesByteRangeColors(mtlText);
+  const { MTLLoader } = await loaderImports.mtl();
+  const creator = new MTLLoader(manager).setMaterialOptions({
+    side: THREE.DoubleSide,
+    wrap: THREE.RepeatWrapping,
+    normalizeRGB,
+    ignoreZeroRGBs: true,
+  }).parse(mtlText, "");
+  creator.preload();
+  return { creator, referencedMtl, mtlFile, normalizeRGB };
+}
+
+async function parseInWorker(mainFile, format, active, setProgress, materialCreator = null, preloadedText = null) {
+  const worker = new Worker(new URL("./modelParser.worker.js", import.meta.url), { type: "module" });
+  active.worker = worker;
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const payload = {};
+  const transfers = [];
+  if (format === "obj" && preloadedText != null) payload.text = preloadedText;
+  else {
+    payload.buffer = await createReaderTask(active, mainFile, "buffer");
+    transfers.push(payload.buffer);
+  }
+  return new Promise((resolve, reject) => {
+    active.workerReject = reject;
+    const cleanup = () => {
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.terminate();
+      if (active.worker === worker) active.worker = null;
+      if (active.workerReject === reject) active.workerReject = null;
+    };
+    worker.onerror = (event) => {
+      cleanup();
+      reject(new Error(event?.message || "Model worker crashed."));
+    };
+    worker.onmessage = async (event) => {
+      const message = event.data || {};
+      if (message.id !== id) return;
+      if (message.type === "progress") {
+        setProgress(28 + Math.round((message.progress || 0) * 0.34), message.label || "Worker parsing geometry");
+        return;
+      }
+      if (message.type === "error") {
+        cleanup();
+        reject(new Error(message.message || "Worker parse failed."));
+        return;
+      }
+      if (message.type === "done") {
+        cleanup();
+        try {
+          const object = await reconstructWorkerObject(message.payload, materialCreator, (ratio) => {
+            setProgress(62 + ratio * 12, "Building scene progressively");
+          }, () => active.cancelled);
+          resolve(object);
+        } catch (error) {
+          reject(error);
+        }
+      }
+    };
+    worker.postMessage({ id, format, payload }, transfers);
+  });
+}
+
+async function configureGltfLoader(manager, renderer) {
+  const [{ GLTFLoader }, { DRACOLoader }, { KTX2Loader }, meshoptModule] = await Promise.all([
+    loaderImports.gltf(),
+    loaderImports.draco(),
+    loaderImports.ktx2(),
+    import("three/addons/libs/meshopt_decoder.module.js"),
+  ]);
+  const loader = new GLTFLoader(manager);
+  const draco = new DRACOLoader(manager).setDecoderPath(`${LOCAL_DECODER_ROOT}/draco/`);
+  const ktx2 = new KTX2Loader(manager).setTranscoderPath(`${LOCAL_DECODER_ROOT}/basis/`);
+  if (renderer) ktx2.detectSupport(renderer);
+  loader.setDRACOLoader(draco);
+  loader.setKTX2Loader(ktx2);
+  loader.setMeshoptDecoder(meshoptModule.MeshoptDecoder || meshoptModule.default || meshoptModule);
+  loader.userData = { draco, ktx2 };
+  return loader;
+}
+
+async function loadModel(mainFile, files, manager, active, setProgress, renderer = null) {
   const ext = extensionOf(mainFile.name);
-  setProgress(28, `Reading ${mainFile.name}`);
+  setProgress(24, `Reading ${mainFile.name}`);
+
+  if (WORKER_FORMATS.has(ext) && mainFile.size >= WORKER_THRESHOLD_BYTES) {
+    if (ext === "obj") {
+      const mtl = await loadMtlCreatorForWorker(mainFile, files, manager, active);
+      setProgress(31, mtl.mtlFile ? `Worker parsing OBJ + ${mtl.mtlFile.name}` : "Worker parsing OBJ geometry");
+      const object = await parseInWorker(mainFile, ext, active, setProgress, mtl.creator, null);
+      object.userData.importMaterialInfo = {
+        mtlFile: mtl.mtlFile?.name || "",
+        referencedMtl: mtl.referencedMtl,
+        hasMaterialLibrary: Boolean(mtl.creator),
+        workerParsed: true,
+      };
+      return object;
+    }
+    setProgress(31, `Worker parsing ${ext.toUpperCase()} geometry`);
+    const object = await parseInWorker(mainFile, ext, active, setProgress);
+    object.userData.importMaterialInfo = { workerParsed: true };
+    return object;
+  }
 
   if (ext === "obj") {
-    const objText = await createReaderTask(active, mainFile, "text");
-    const referencedMtl = objText.match(/^\s*mtllib\s+(.+)$/im)?.[1]?.trim() || "";
-    const mtlFile = findMatchingMtl(mainFile, files, referencedMtl);
-    let materials = null;
-    if (mtlFile) {
-      const mtlText = await createReaderTask(active, mtlFile, "text");
-      const normalizeRGB = mtlUsesByteRangeColors(mtlText);
-      const mtlLoader = new MTLLoader(manager).setMaterialOptions({
-        side: THREE.DoubleSide,
-        wrap: THREE.RepeatWrapping,
-        normalizeRGB,
-        ignoreZeroRGBs: true,
-      });
-      materials = mtlLoader.parse(mtlText, "");
-      materials.preload();
-      setProgress(42, `Material library: ${mtlFile.name}${normalizeRGB ? " · RGB normalized" : ""}`);
-    }
+    const { creator, referencedMtl, mtlFile, objText, normalizeRGB } = await loadMtlCreator(mainFile, files, manager, active);
+    if (mtlFile) setProgress(42, `Material library: ${mtlFile.name}${normalizeRGB ? " · RGB normalized" : ""}`);
+    const { OBJLoader } = await loaderImports.obj();
     const loader = new OBJLoader(manager);
-    if (materials) loader.setMaterials(materials);
+    if (creator) loader.setMaterials(creator);
     setProgress(62, "Parsing OBJ geometry + materials");
     const object = loader.parse(objText);
     object.userData.importMaterialInfo = {
       mtlFile: mtlFile?.name || "",
       referencedMtl,
-      hasMaterialLibrary: Boolean(materials),
+      hasMaterialLibrary: Boolean(creator),
+      workerParsed: false,
     };
     return object;
   }
 
   if (ext === "stl") {
+    const { STLLoader } = await loaderImports.stl();
     const geometry = new STLLoader(manager).parse(await createReaderTask(active, mainFile, "buffer"));
     geometry.computeVertexNormals?.();
     return new THREE.Mesh(geometry, makeDefaultMaterial(geometry));
   }
 
   if (ext === "ply") {
+    const { PLYLoader } = await loaderImports.ply();
     const geometry = new PLYLoader(manager).parse(await createReaderTask(active, mainFile, "buffer"));
     geometry.computeVertexNormals?.();
     return new THREE.Mesh(geometry, makeDefaultMaterial(geometry));
   }
 
-  if (ext === "glb") {
-    const buffer = await createReaderTask(active, mainFile, "buffer");
-    return new Promise((resolve, reject) => {
-      new GLTFLoader(manager).parse(buffer, "", (gltf) => resolve(gltf.scene), reject);
-    });
-  }
-
-  if (ext === "gltf") {
-    const text = await createReaderTask(active, mainFile, "text");
-    return new Promise((resolve, reject) => {
-      new GLTFLoader(manager).parse(text, "", (gltf) => resolve(gltf.scene), reject);
-    });
+  if (ext === "glb" || ext === "gltf") {
+    const loader = await configureGltfLoader(manager, renderer);
+    const source = ext === "glb"
+      ? await createReaderTask(active, mainFile, "buffer")
+      : await createReaderTask(active, mainFile, "text");
+    try {
+      return await new Promise((resolve, reject) => {
+        loader.parse(source, "", (gltf) => resolve(gltf.scene), reject);
+      });
+    } finally {
+      loader.userData?.draco?.dispose?.();
+      loader.userData?.ktx2?.dispose?.();
+    }
   }
 
   if (ext === "fbx") {
+    const { FBXLoader } = await loaderImports.fbx();
     return new FBXLoader(manager).parse(await createReaderTask(active, mainFile, "buffer"), "");
   }
 
   if (ext === "dae") {
+    const { ColladaLoader } = await loaderImports.dae();
     return new ColladaLoader(manager).parse(await createReaderTask(active, mainFile, "text"), "").scene;
   }
 
   if (ext === "3mf") {
+    const { ThreeMFLoader } = await loaderImports["3mf"]();
     return new ThreeMFLoader(manager).parse(await createReaderTask(active, mainFile, "buffer"));
   }
 
   if (ext === "3ds") {
+    const { TDSLoader } = await loaderImports["3ds"]();
     return new TDSLoader(manager).parse(await createReaderTask(active, mainFile, "buffer"), "");
   }
 
@@ -425,7 +753,8 @@ function applyShading(root, mode) {
 
 function warningsForStats(stats, totalBytes, dependencies) {
   const warnings = [];
-  if (totalBytes > 80 * 1024 * 1024) warnings.push(`Large model bundle (${formatBytes(totalBytes)}). Browser memory use may be high.`);
+  if (totalBytes > 300 * 1024 * 1024) warnings.push(`Very large model bundle (${formatBytes(totalBytes)}). Camera Studio will lower viewport quality and use worker parsing where supported.`);
+  else if (totalBytes > 80 * 1024 * 1024) warnings.push(`Large model bundle (${formatBytes(totalBytes)}). Browser memory use may be high.`);
   if (stats.triangleCount > 1_000_000) warnings.push(`${stats.triangleCount.toLocaleString()} triangles is very heavy for a browser viewport.`);
   else if (stats.triangleCount > 500_000) warnings.push(`${stats.triangleCount.toLocaleString()} triangles may reduce viewport performance.`);
   if (stats.vertexCount > 1_500_000) warnings.push(`${stats.vertexCount.toLocaleString()} vertices may use substantial GPU memory.`);
@@ -440,6 +769,200 @@ function warningsForStats(stats, totalBytes, dependencies) {
     warnings.push("Texture maps were loaded, but the mesh has no UV coordinates, so textures may not display correctly.");
   }
   return warnings;
+}
+
+
+function ensureSceneIds(root) {
+  let index = 0;
+  root?.traverse?.((node) => {
+    if (!node.userData.sceneId) node.userData.sceneId = `scene-${node.uuid || ++index}`;
+    if (node.userData.locked == null) node.userData.locked = false;
+  });
+}
+
+function objectStats(node) {
+  let meshes = 0;
+  let vertices = 0;
+  let triangles = 0;
+  let materials = 0;
+  node?.traverse?.((child) => {
+    if (!child.isMesh) return;
+    meshes += 1;
+    const position = child.geometry?.attributes?.position;
+    if (position) vertices += position.count || 0;
+    triangles += child.geometry?.index
+      ? Math.floor((child.geometry.index.count || 0) / 3)
+      : position
+        ? Math.floor((position.count || 0) / 3)
+        : 0;
+    materials += Array.isArray(child.material) ? child.material.length : child.material ? 1 : 0;
+  });
+  return { meshes, vertices, triangles, materials };
+}
+
+function buildSceneGraphNode(node) {
+  const children = (node.children || [])
+    .filter((child) => child.isObject3D && !child.userData?.viewportHelper)
+    .map(buildSceneGraphNode);
+  const ownPosition = node.isMesh ? node.geometry?.attributes?.position : null;
+  const ownStats = {
+    meshes: node.isMesh ? 1 : 0,
+    vertices: ownPosition?.count || 0,
+    triangles: node.isMesh
+      ? node.geometry?.index
+        ? Math.floor((node.geometry.index.count || 0) / 3)
+        : ownPosition
+          ? Math.floor((ownPosition.count || 0) / 3)
+          : 0
+      : 0,
+    materials: node.isMesh ? (Array.isArray(node.material) ? node.material.length : node.material ? 1 : 0) : 0,
+  };
+  const stats = children.reduce((sum, child) => ({
+    meshes: sum.meshes + (child.stats?.meshes || 0),
+    vertices: sum.vertices + (child.stats?.vertices || 0),
+    triangles: sum.triangles + (child.stats?.triangles || 0),
+    materials: sum.materials + (child.stats?.materials || 0),
+  }), ownStats);
+  return {
+    id: node.userData.sceneId || node.uuid,
+    uuid: node.uuid,
+    name: node.name || node.type || "Object",
+    type: node.type || (node.isMesh ? "Mesh" : "Object"),
+    visible: node.visible !== false,
+    locked: Boolean(node.userData?.locked),
+    stats,
+    children,
+  };
+}
+
+function collectMaterialsForSelection(objects = []) {
+  const map = new Map();
+  for (const object of objects) {
+    object?.traverse?.((node) => {
+      if (!node.isMesh) return;
+      const sourceMaterial = node.userData?.originalViewportMaterial || node.material;
+      const materials = Array.isArray(sourceMaterial) ? sourceMaterial : sourceMaterial ? [sourceMaterial] : [];
+      materials.forEach((material, index) => {
+        if (!material) return;
+        const id = material.uuid || `${node.uuid}-material-${index}`;
+        if (map.has(id)) return;
+        const textureSlots = ["map", "normalMap", "roughnessMap", "metalnessMap", "emissiveMap", "alphaMap", "aoMap"]
+          .filter((key) => material[key]?.isTexture);
+        const textureDetails = textureSlots.map((slot) => {
+          const texture = material[slot];
+          const image = texture?.image || texture?.source?.data;
+          const src = typeof image?.src === "string" && /^(blob:|data:|https?:)/i.test(image.src) ? image.src : "";
+          return {
+            slot,
+            name: texture?.name || image?.name || baseName(image?.src || "") || "Texture",
+            src,
+            width: image?.width || 0,
+            height: image?.height || 0,
+          };
+        });
+        map.set(id, {
+          id,
+          name: material.name || `Material ${map.size + 1}`,
+          type: material.type || "Material",
+          color: material.color?.isColor ? `#${material.color.getHexString()}` : "#b8c0ca",
+          emissive: material.emissive?.isColor ? `#${material.emissive.getHexString()}` : "#000000",
+          roughness: Number.isFinite(material.roughness) ? material.roughness : null,
+          metalness: Number.isFinite(material.metalness) ? material.metalness : null,
+          opacity: Number.isFinite(material.opacity) ? material.opacity : 1,
+          transparent: Boolean(material.transparent),
+          doubleSided: material.side === THREE.DoubleSide,
+          textures: textureSlots,
+          textureDetails,
+        });
+      });
+    });
+  }
+  return Array.from(map.values());
+}
+
+function textureByteEstimate(texture) {
+  const image = texture?.image;
+  const width = image?.width || image?.videoWidth || 0;
+  const height = image?.height || image?.videoHeight || 0;
+  if (!width || !height) return 0;
+  return width * height * 4 * 1.33;
+}
+
+function estimateGpuBytes(root) {
+  const seenGeometry = new Set();
+  const seenTextures = new Set();
+  let geometryBytes = 0;
+  let textureBytes = 0;
+  root?.traverse?.((node) => {
+    const geometry = node.geometry;
+    if (geometry && !seenGeometry.has(geometry.uuid)) {
+      seenGeometry.add(geometry.uuid);
+      for (const attribute of Object.values(geometry.attributes || {})) geometryBytes += attribute?.array?.byteLength || 0;
+      geometryBytes += geometry.index?.array?.byteLength || 0;
+    }
+    const materials = Array.isArray(node.material) ? node.material : node.material ? [node.material] : [];
+    materials.forEach((material) => {
+      for (const key of Object.keys(material || {})) {
+        const texture = material?.[key];
+        if (texture?.isTexture && !seenTextures.has(texture.uuid)) {
+          seenTextures.add(texture.uuid);
+          textureBytes += textureByteEstimate(texture);
+        }
+      }
+    });
+  });
+  return { geometryBytes, textureBytes, totalBytes: geometryBytes + textureBytes };
+}
+
+function qualityForScene(stats, totalBytes, requested = "auto") {
+  if (["low", "medium", "high", "ultra"].includes(requested)) return requested;
+  const memory = Number(navigator.deviceMemory || 8);
+  const cores = Number(navigator.hardwareConcurrency || 8);
+  if (totalBytes > 320 * 1024 * 1024 || stats.triangleCount > 3_000_000 || memory <= 4 || cores <= 4) return "low";
+  if (totalBytes > 180 * 1024 * 1024 || stats.triangleCount > 1_500_000 || memory <= 6) return "medium";
+  if (stats.triangleCount > 650_000 || totalBytes > 90 * 1024 * 1024) return "high";
+  return "ultra";
+}
+
+function qualityPixelRatio(quality) {
+  const dpr = window.devicePixelRatio || 1;
+  if (quality === "low") return Math.min(dpr, 1);
+  if (quality === "medium") return Math.min(dpr, 1.25);
+  if (quality === "high") return Math.min(dpr, 1.6);
+  return Math.min(dpr, 2);
+}
+
+function qualityIndex(quality) {
+  return ["low", "medium", "high", "ultra"].indexOf(quality);
+}
+
+function kelvinToColor(kelvin = 6500) {
+  const temperature = THREE.MathUtils.clamp(Number(kelvin) || 6500, 1000, 40000) / 100;
+  let red;
+  let green;
+  let blue;
+  if (temperature <= 66) {
+    red = 255;
+    green = 99.4708025861 * Math.log(temperature) - 161.1195681661;
+    blue = temperature <= 19 ? 0 : 138.5177312231 * Math.log(temperature - 10) - 305.0447927307;
+  } else {
+    red = 329.698727446 * Math.pow(temperature - 60, -0.1332047592);
+    green = 288.1221695283 * Math.pow(temperature - 60, -0.0755148492);
+    blue = 255;
+  }
+  return new THREE.Color(
+    THREE.MathUtils.clamp(red, 0, 255) / 255,
+    THREE.MathUtils.clamp(green, 0, 255) / 255,
+    THREE.MathUtils.clamp(blue, 0, 255) / 255,
+  );
+}
+
+function findBySceneId(root, id) {
+  let result = null;
+  root?.traverse?.((node) => {
+    if (!result && (node.userData?.sceneId === id || node.uuid === id)) result = node;
+  });
+  return result;
 }
 
 export function isSupportedModelFile(file) {
@@ -491,9 +1014,16 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
   showGround = true,
   modelTransform = DEFAULT_MODEL_TRANSFORM,
   resetTransformSignal = 0,
+  selectedObjectIds = [],
+  lightingConfig = {},
+  customEnvironmentFile = null,
+  qualityMode = "auto",
   onModelInfo,
   onLoadState,
   onSelectionChange,
+  onSceneGraphChange,
+  onMaterialInfo,
+  onPerformanceInfo,
   onCameraStateChange,
   onError,
 }, forwardedRef) {
@@ -511,8 +1041,18 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
   const gridRef = useRef(null);
   const groundRef = useRef(null);
   const axesRef = useRef(null);
-  const selectionHelperRef = useRef(null);
+  const selectionHelperRef = useRef([]);
+  const selectedObjectsRef = useRef([]);
   const activeLoadRef = useRef(null);
+  const lightsRef = useRef({ hemisphere: null, ambient: null, key: null, fill: null, rim: null });
+  const environmentTextureRef = useRef(null);
+  const qualityRef = useRef("high");
+  const autoQualityCeilingRef = useRef("ultra");
+  const adaptiveQualityRef = useRef({ lowTicks: 0, highTicks: 0, lastChange: 0 });
+  const frameMetricsRef = useRef({ lastTime: performance.now(), frames: 0, fps: 0, lastReport: 0 });
+  const contextLostRef = useRef(false);
+  const gpuNameRef = useRef("WebGL GPU");
+  const gpuEstimateRef = useRef({ geometryBytes: 0, textureBytes: 0, totalBytes: 0 });
   const objectUrlsRef = useRef([]);
   const animationRef = useRef(null);
   const resizeObserverRef = useRef(null);
@@ -521,40 +1061,432 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
   const syncingCameraRef = useRef(false);
   const projectionModeRef = useRef(projectionMode);
   projectionModeRef.current = projectionMode;
+  const mainFileRef = useRef(mainFile);
+  mainFileRef.current = mainFile;
+  const qualityModeRef = useRef(qualityMode);
+  qualityModeRef.current = qualityMode;
+  const lightingConfigRef = useRef(lightingConfig);
+  lightingConfigRef.current = lightingConfig;
   const [status, setStatus] = useState("idle");
   const [progress, setProgressState] = useState(0);
   const [progressLabel, setProgressLabel] = useState("");
-  const [selectedName, setSelectedName] = useState("");
+  const [selectedNames, setSelectedNames] = useState([]);
   const [reloadToken, setReloadToken] = useState(0);
 
+  const refreshSelectionHelpers = (objects = selectedObjectsRef.current) => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    for (const helper of selectionHelperRef.current || []) {
+      scene.remove(helper);
+      helper.geometry?.dispose?.();
+      disposeMaterial(helper.material);
+    }
+    selectionHelperRef.current = [];
+    for (const object of objects) {
+      if (!object?.isObject3D) continue;
+      const helper = new THREE.BoxHelper(object, 0x4ea1ff);
+      helper.userData.viewportHelper = true;
+      selectionHelperRef.current.push(helper);
+      scene.add(helper);
+    }
+  };
+
+  const refreshGpuEstimate = () => {
+    gpuEstimateRef.current = estimateGpuBytes(modelRef.current);
+    return gpuEstimateRef.current;
+  };
+
+  const emitSceneGraph = () => {
+    const root = modelRef.current;
+    if (!root) {
+      onSceneGraphChange?.(null);
+      return;
+    }
+    ensureSceneIds(root);
+    onSceneGraphChange?.({
+      id: "scene-root",
+      name: "Scene",
+      type: "Scene",
+      children: [
+        { id: "camera-node", name: projectionModeRef.current === "orthographic" ? "Camera (Orthographic)" : "Camera (Perspective)", type: "Camera", visible: true, locked: false, stats: {}, children: [] },
+        { id: "lights-node", name: "Lights", type: "Lights", visible: true, locked: false, stats: {}, children: [] },
+        buildSceneGraphNode(root),
+      ],
+    });
+  };
+
+  const emitMaterialInfo = () => {
+    onMaterialInfo?.({
+      selectedIds: selectedObjectsRef.current.map((object) => object.userData?.sceneId || object.uuid),
+      materials: collectMaterialsForSelection(selectedObjectsRef.current.length ? selectedObjectsRef.current : [modelRef.current].filter(Boolean)),
+    });
+  };
+
+  const selectObjectsByIds = (ids = [], additive = false) => {
+    const root = modelRef.current;
+    if (!root) return [];
+    const next = additive ? [...selectedObjectsRef.current] : [];
+    const seen = new Set(next.map((object) => object.userData?.sceneId || object.uuid));
+    for (const id of ids) {
+      const object = findBySceneId(root, id);
+      if (!object || object.userData?.locked) continue;
+      const objectId = object.userData?.sceneId || object.uuid;
+      if (!seen.has(objectId)) {
+        next.push(object);
+        seen.add(objectId);
+      }
+    }
+    selectedObjectsRef.current = next;
+    setSelectedNames(next.map((object) => object.name || "Object"));
+    refreshSelectionHelpers(next);
+    const payload = next.map((object) => ({
+      id: object.userData?.sceneId || object.uuid,
+      uuid: object.uuid,
+      name: object.name || "Object",
+      type: object.type || "Object",
+      stats: objectStats(object),
+    }));
+    onSelectionChange?.(payload);
+    emitMaterialInfo();
+    return payload;
+  };
+
   useImperativeHandle(forwardedRef, () => ({
-    async captureScreenshot() {
+    async captureScreenshot(options = {}) {
       const renderer = rendererRef.current;
       const scene = sceneRef.current;
       const camera = getActiveCamera();
-      if (!renderer || !scene || !camera) throw new Error("3D viewport is not ready.");
-      const selectionHelper = selectionHelperRef.current;
-      const selectionWasVisible = selectionHelper?.visible;
-      if (selectionHelper) selectionHelper.visible = false;
-      renderer.render(scene, camera);
-      return new Promise((resolve, reject) => {
-        renderer.domElement.toBlob((blob) => {
-          if (selectionHelper) selectionHelper.visible = selectionWasVisible !== false;
-          if (blob) resolve(blob);
-          else reject(new Error("Could not capture the viewport."));
-        }, "image/png");
+      const host = hostRef.current;
+      if (!renderer || !scene || !camera || !host) throw new Error("3D viewport is not ready.");
+      const format = ["image/jpeg", "image/webp", "image/png"].includes(options.mimeType) ? options.mimeType : "image/png";
+      const quality = Number.isFinite(options.quality) ? options.quality : 0.94;
+      const currentSize = new THREE.Vector2();
+      renderer.getSize(currentSize);
+      const captureScale = Math.max(0.25, Math.min(4, Number(options.scale) || 1));
+      const width = Math.max(64, Math.min(8192, Math.round(options.width || currentSize.x * captureScale)));
+      const height = Math.max(64, Math.min(8192, Math.round(options.height || currentSize.y * captureScale)));
+      const oldBackground = scene.background;
+      const oldAlpha = renderer.getClearAlpha();
+      const oldTarget = renderer.getRenderTarget();
+      const helpers = selectionHelperRef.current || [];
+      const helperVisibility = helpers.map((helper) => helper.visible);
+      helpers.forEach((helper) => { helper.visible = false; });
+      const oldProjection = camera.isPerspectiveCamera
+        ? { aspect: camera.aspect }
+        : { left: camera.left, right: camera.right, top: camera.top, bottom: camera.bottom };
+      const captureAspect = width / Math.max(height, 1);
+      if (camera.isPerspectiveCamera) camera.aspect = captureAspect;
+      else if (camera.isOrthographicCamera) {
+        const halfHeight = Math.max((camera.top - camera.bottom) * 0.5, 0.001);
+        camera.left = -halfHeight * captureAspect;
+        camera.right = halfHeight * captureAspect;
+      }
+      camera.updateProjectionMatrix();
+
+      const renderTarget = new THREE.WebGLRenderTarget(width, height, {
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType,
+        depthBuffer: true,
+        stencilBuffer: false,
       });
+      renderTarget.texture.colorSpace = THREE.SRGBColorSpace;
+
+      try {
+        if (options.transparent) {
+          scene.background = null;
+          renderer.setClearAlpha(0);
+        }
+        renderer.setRenderTarget(renderTarget);
+        renderer.clear(true, true, true);
+        renderer.render(scene, camera);
+        const pixels = new Uint8Array(width * height * 4);
+        renderer.readRenderTargetPixels(renderTarget, 0, 0, width, height, pixels);
+
+        // WebGL pixels are bottom-up; flip rows before encoding.
+        const rowBytes = width * 4;
+        const flipped = new Uint8ClampedArray(pixels.length);
+        for (let y = 0; y < height; y += 1) {
+          const sourceOffset = (height - 1 - y) * rowBytes;
+          flipped.set(pixels.subarray(sourceOffset, sourceOffset + rowBytes), y * rowBytes);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d", { alpha: true });
+        if (!context) throw new Error("2D export canvas is unavailable.");
+        context.putImageData(new ImageData(flipped, width, height), 0, 0);
+        const blob = await new Promise((resolve, reject) => {
+          canvas.toBlob((result) => result ? resolve(result) : reject(new Error("Could not encode the viewport image.")), format, quality);
+        });
+        return blob;
+      } finally {
+        renderer.setRenderTarget(oldTarget);
+        renderTarget.dispose();
+        scene.background = oldBackground;
+        renderer.setClearAlpha(oldAlpha);
+        if (camera.isPerspectiveCamera) camera.aspect = oldProjection.aspect;
+        else if (camera.isOrthographicCamera) {
+          camera.left = oldProjection.left;
+          camera.right = oldProjection.right;
+          camera.top = oldProjection.top;
+          camera.bottom = oldProjection.bottom;
+        }
+        camera.updateProjectionMatrix();
+        helpers.forEach((helper, index) => { helper.visible = helperVisibility[index] !== false; });
+        renderer.render(scene, camera);
+      }
     },
     getSelectedObject() {
-      return selectedName || "";
+      return selectedObjectsRef.current.map((object) => object.name || "Object").join(", ");
     },
-    retryLoad() {
-      setReloadToken((value) => value + 1);
+    getSceneSnapshot() {
+      const root = modelRef.current;
+      return root ? buildSceneGraphNode(root) : null;
     },
-    cancelLoad() {
-      activeLoadRef.current?.cancel?.();
+    getPerformanceSnapshot() {
+      const renderer = rendererRef.current;
+      const memory = gpuEstimateRef.current;
+      return {
+        quality: qualityRef.current,
+        fps: frameMetricsRef.current.fps,
+        calls: renderer?.info?.render?.calls || 0,
+        triangles: renderer?.info?.render?.triangles || 0,
+        geometries: renderer?.info?.memory?.geometries || 0,
+        textures: renderer?.info?.memory?.textures || 0,
+        estimatedGpuBytes: memory.totalBytes,
+        gpuName: gpuNameRef.current,
+      };
     },
-  }), [selectedName]);
+    selectObjects(ids = [], additive = false) {
+      return selectObjectsByIds(ids, additive);
+    },
+    renameObject(id, name) {
+      const object = findBySceneId(modelRef.current, id);
+      if (!object || !String(name || "").trim()) return false;
+      object.name = String(name).trim().slice(0, 120);
+      emitSceneGraph();
+      return true;
+    },
+    setObjectVisibility(id, visible) {
+      const object = findBySceneId(modelRef.current, id);
+      if (!object) return false;
+      object.visible = Boolean(visible);
+      emitSceneGraph();
+      return true;
+    },
+    setObjectLocked(id, locked) {
+      const object = findBySceneId(modelRef.current, id);
+      if (!object) return false;
+      object.userData.locked = Boolean(locked);
+      emitSceneGraph();
+      return true;
+    },
+    duplicateObjects(ids = []) {
+      const root = modelRef.current;
+      if (!root) return [];
+      const created = [];
+      ids.forEach((id) => {
+        const object = findBySceneId(root, id);
+        if (!object || object === root || !object.parent) return;
+        const clone = object.clone(true);
+        clone.name = `${object.name || "Object"} Copy`;
+        clone.position.x += Math.max(modelRadiusRef.current * 0.06, 0.05);
+        const sourceNodes = [];
+        const cloneNodes = [];
+        object.traverse((node) => sourceNodes.push(node));
+        clone.traverse((node) => cloneNodes.push(node));
+        cloneNodes.forEach((node, nodeIndex) => {
+          delete node.userData.sceneId;
+          if (!node.isMesh) return;
+          const sourceNode = sourceNodes[nodeIndex];
+          if (sourceNode?.geometry?.clone) node.geometry = sourceNode.geometry.clone();
+          const sourceMaterial = sourceNode?.userData?.originalViewportMaterial || sourceNode?.material || node.material;
+          if (Array.isArray(sourceMaterial)) node.material = sourceMaterial.map((material) => material?.clone?.() || material);
+          else if (sourceMaterial?.clone) node.material = sourceMaterial.clone();
+          else node.material = sourceMaterial;
+          node.userData.generatedViewportMaterial = null;
+          node.userData.originalViewportMaterial = node.material;
+        });
+        ensureSceneIds(clone);
+        object.parent.add(clone);
+        if (shadingMode !== "material") applyShading(clone, shadingMode);
+        created.push(clone.userData.sceneId || clone.uuid);
+      });
+      refreshGpuEstimate();
+      emitSceneGraph();
+      selectObjectsByIds(created, false);
+      return created;
+    },
+    deleteObjects(ids = []) {
+      const root = modelRef.current;
+      if (!root) return false;
+      const deleting = new Set(ids);
+      ids.forEach((id) => {
+        const object = findBySceneId(root, id);
+        if (!object || object === root || !object.parent) return;
+        object.parent.remove(object);
+        disposeDetachedObject(object, root);
+      });
+      const remaining = selectedObjectsRef.current.filter((object) => !deleting.has(object.userData?.sceneId || object.uuid));
+      selectObjectsByIds(remaining.map((object) => object.userData?.sceneId || object.uuid), false);
+      refreshGpuEstimate();
+      emitSceneGraph();
+      return true;
+    },
+    isolateObjects(ids = []) {
+      const root = modelRef.current;
+      if (!root) return false;
+      const keep = new Set(ids);
+      root.traverse((node) => {
+        if (!node.isMesh) return;
+        const id = node.userData?.sceneId || node.uuid;
+        node.visible = keep.size ? keep.has(id) || ids.some((selectedId) => {
+          let parent = node.parent;
+          while (parent && parent !== root.parent) {
+            if ((parent.userData?.sceneId || parent.uuid) === selectedId) return true;
+            parent = parent.parent;
+          }
+          return false;
+        }) : true;
+      });
+      emitSceneGraph();
+      return true;
+    },
+    showAllObjects() {
+      modelRef.current?.traverse?.((node) => { if (node.isMesh) node.visible = true; });
+      emitSceneGraph();
+    },
+    parentObjects(childIds = [], parentId = null) {
+      const root = modelRef.current;
+      if (!root) return false;
+      const parent = parentId ? findBySceneId(root, parentId) : root;
+      if (!parent) return false;
+      childIds.forEach((id) => {
+        const child = findBySceneId(root, id);
+        if (!child || child === root || child === parent || child.parent === parent) return;
+        if (child.getObjectById?.(parent.id)) return;
+        parent.attach(child);
+      });
+      emitSceneGraph();
+      return true;
+    },
+    frameSelection(ids = []) {
+      const root = modelRef.current;
+      const controls = controlsRef.current;
+      const camera = getActiveCamera();
+      if (!root || !controls || !camera) return false;
+      const objects = (ids.length ? ids.map((id) => findBySceneId(root, id)) : selectedObjectsRef.current).filter(Boolean);
+      if (!objects.length) return false;
+      const box = new THREE.Box3();
+      objects.forEach((object) => box.expandByObject(object));
+      if (box.isEmpty()) return false;
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      const radius = Math.max(size.length() * 0.5, 0.1);
+      const direction = camera.position.clone().sub(controls.target).normalize();
+      controls.target.copy(center);
+      camera.position.copy(center).addScaledVector(direction, radius * 3.2);
+      if (camera.isOrthographicCamera) camera.zoom = Math.max(0.1, 1.7 / radius);
+      camera.updateProjectionMatrix();
+      controls.update();
+      return true;
+    },
+    updateMaterial(materialId, patch = {}) {
+      const root = modelRef.current;
+      if (!root) return false;
+      let changed = false;
+      const visited = new Set();
+      root.traverse((node) => {
+        if (!node.isMesh) return;
+        const sourceMaterial = node.userData?.originalViewportMaterial || node.material;
+        const materials = Array.isArray(sourceMaterial) ? sourceMaterial : sourceMaterial ? [sourceMaterial] : [];
+        materials.forEach((material) => {
+          if (!material || visited.has(material) || material.uuid !== materialId) return;
+          visited.add(material);
+          if (patch.color && material.color?.isColor) material.color.set(patch.color);
+          if (patch.emissive && material.emissive?.isColor) material.emissive.set(patch.emissive);
+          if (patch.roughness != null && "roughness" in material) material.roughness = THREE.MathUtils.clamp(Number(patch.roughness), 0, 1);
+          if (patch.metalness != null && "metalness" in material) material.metalness = THREE.MathUtils.clamp(Number(patch.metalness), 0, 1);
+          if (patch.opacity != null) {
+            material.opacity = THREE.MathUtils.clamp(Number(patch.opacity), 0, 1);
+            material.transparent = material.opacity < 0.999;
+          }
+          if (patch.doubleSided != null) material.side = patch.doubleSided ? THREE.DoubleSide : THREE.FrontSide;
+          material.needsUpdate = true;
+          changed = true;
+        });
+      });
+      if (changed) emitMaterialInfo();
+      return changed;
+    },
+    async setMaterialTexture(materialId, file, slot = "map") {
+      if (!file) return false;
+      const url = URL.createObjectURL(file);
+      objectUrlsRef.current.push(url);
+      const ext = extensionOf(file.name);
+      let texture;
+      if (ext === "tga") {
+        const { TGALoader } = await loaderImports.tga();
+        texture = await new TGALoader().loadAsync(url);
+      } else if (ext === "dds") {
+        const { DDSLoader } = await loaderImports.dds();
+        texture = await new DDSLoader().loadAsync(url);
+      } else if (ext === "ktx2") {
+        const { KTX2Loader } = await loaderImports.ktx2();
+        const loader = new KTX2Loader().setTranscoderPath(`${LOCAL_DECODER_ROOT}/basis/`);
+        if (rendererRef.current) loader.detectSupport(rendererRef.current);
+        try { texture = await loader.loadAsync(url); } finally { loader.dispose?.(); }
+      } else {
+        texture = await new THREE.TextureLoader().loadAsync(url);
+      }
+      texture.colorSpace = slot === "map" || slot === "emissiveMap" ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+      texture.flipY = ["glb", "gltf"].includes(extensionOf(mainFileRef.current?.name)) ? false : texture.flipY;
+      texture.needsUpdate = true;
+      let changed = false;
+      const visited = new Set();
+      modelRef.current?.traverse?.((node) => {
+        if (!node.isMesh) return;
+        const sourceMaterial = node.userData?.originalViewportMaterial || node.material;
+        const materials = Array.isArray(sourceMaterial) ? sourceMaterial : sourceMaterial ? [sourceMaterial] : [];
+        materials.forEach((material) => {
+          if (!material || visited.has(material) || material.uuid !== materialId || !(slot in material)) return;
+          visited.add(material);
+          const previousTexture = material[slot];
+          material[slot] = texture;
+          material.needsUpdate = true;
+          if (previousTexture && previousTexture !== texture) previousTexture.dispose?.();
+          changed = true;
+        });
+      });
+      if (!changed) texture.dispose?.();
+      if (changed) refreshGpuEstimate();
+      emitMaterialInfo();
+      return changed;
+    },
+    removeMaterialTexture(materialId, slot = "map") {
+      let changed = false;
+      const visited = new Set();
+      modelRef.current?.traverse?.((node) => {
+        if (!node.isMesh) return;
+        const sourceMaterial = node.userData?.originalViewportMaterial || node.material;
+        const materials = Array.isArray(sourceMaterial) ? sourceMaterial : sourceMaterial ? [sourceMaterial] : [];
+        materials.forEach((material) => {
+          if (!material || visited.has(material) || material.uuid !== materialId || !material[slot]) return;
+          visited.add(material);
+          const oldTexture = material[slot];
+          material[slot] = null;
+          material.needsUpdate = true;
+          oldTexture.dispose?.();
+          changed = true;
+        });
+      });
+      if (changed) refreshGpuEstimate();
+      emitMaterialInfo();
+      return changed;
+    },
+    retryLoad() { setReloadToken((value) => value + 1); },
+    cancelLoad() { activeLoadRef.current?.cancel?.(); },
+  }));
 
   const totalBytes = useMemo(() => files.reduce((sum, file) => sum + (file?.size || 0), 0), [files]);
 
@@ -633,8 +1565,8 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
     orthographic.position.copy(perspective.position);
     camerasRef.current = { perspective, orthographic };
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance", preserveDrawingBuffer: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance", preserveDrawingBuffer: false });
+    renderer.setPixelRatio(qualityPixelRatio(qualityRef.current));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -642,18 +1574,47 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
     renderer.toneMappingExposure = 1.08;
     rendererRef.current = renderer;
     host.appendChild(renderer.domElement);
+    try {
+      const gl = renderer.getContext();
+      const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+      if (debugInfo) gpuNameRef.current = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || gpuNameRef.current;
+    } catch {
+      // GPU name is optional and may be blocked for privacy.
+    }
 
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x2b3139, 1.55));
+    const canvasContext = renderer.domElement;
+    const onContextLost = (event) => {
+      event.preventDefault();
+      contextLostRef.current = true;
+      setStatus("context-lost");
+      setProgressLabel("WebGL context lost — recovering…");
+      onLoadState?.({ status: "context-lost", progress: progress, label: "WebGL context lost — recovering…" });
+      window.setTimeout(() => {
+        if (contextLostRef.current) renderer.forceContextRestore?.();
+      }, 600);
+    };
+    const onContextRestored = () => {
+      contextLostRef.current = false;
+      renderer.resetState?.();
+      renderer.setPixelRatio(qualityPixelRatio(qualityRef.current));
+      setStatus(modelRef.current ? "ready" : "idle");
+      setProgressLabel("WebGL context restored");
+      onLoadState?.({ status: modelRef.current ? "ready" : "idle", progress: modelRef.current ? 100 : 0, label: "WebGL context restored" });
+    };
+    canvasContext.addEventListener("webglcontextlost", onContextLost, false);
+    canvasContext.addEventListener("webglcontextrestored", onContextRestored, false);
+
+    const hemisphere = new THREE.HemisphereLight(0xffffff, 0x2b3139, 1.35);
+    const ambient = new THREE.AmbientLight(0xffffff, 0.16);
     const key = new THREE.DirectionalLight(0xffffff, 3.2);
     key.position.set(4, 6, 5);
     key.castShadow = true;
-    scene.add(key);
-    const fill = new THREE.DirectionalLight(0x9ec5ff, 1.05);
+    const fill = new THREE.DirectionalLight(0xa8c8ff, 1.05);
     fill.position.set(-4, 2, 2);
-    scene.add(fill);
     const rim = new THREE.DirectionalLight(0xffffff, 0.75);
     rim.position.set(0, 3, -5);
-    scene.add(rim);
+    lightsRef.current = { hemisphere, ambient, key, fill, rim };
+    scene.add(hemisphere, ambient, key, fill, rim);
 
     const grid = new THREE.GridHelper(20, 40, 0x4b5666, 0x313842);
     const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
@@ -699,8 +1660,10 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
     resizeObserverRef.current = observer;
 
     const canvas = renderer.domElement;
+    canvas.tabIndex = 0;
     const onPointerDown = (event) => {
-      pointerDownRef.current = { x: event.clientX, y: event.clientY, button: event.button, shift: event.shiftKey };
+      pointerDownRef.current = { x: event.clientX, y: event.clientY, button: event.button, shift: event.shiftKey, ctrl: event.ctrlKey || event.metaKey };
+      canvas.focus?.({ preventScroll: true });
     };
     const onPointerUp = (event) => {
       const start = pointerDownRef.current;
@@ -715,34 +1678,106 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
       const camera = getActiveCamera();
       if (!camera || !modelRef.current) return;
       raycasterRef.current.setFromCamera(pointer, camera);
-      const hits = raycasterRef.current.intersectObject(modelRef.current, true).filter((hit) => hit.object?.isMesh);
+      const hits = raycasterRef.current.intersectObject(modelRef.current, true)
+        .filter((hit) => hit.object?.isMesh && !hit.object.userData?.locked && hit.object.visible !== false);
       const selected = hits[0]?.object || null;
-      if (selectionHelperRef.current) {
-        scene.remove(selectionHelperRef.current);
-        selectionHelperRef.current.geometry?.dispose?.();
-        disposeMaterial(selectionHelperRef.current.material);
-        selectionHelperRef.current = null;
-      }
-      if (selected) {
-        const helper = new THREE.BoxHelper(selected, 0x4ea1ff);
-        selectionHelperRef.current = helper;
-        scene.add(helper);
-        setSelectedName(selected.name || "Mesh");
-        onSelectionChange?.({ name: selected.name || "Mesh", uuid: selected.uuid });
-      } else {
-        setSelectedName("");
-        onSelectionChange?.(null);
+      if (selected) selectObjectsByIds([selected.userData?.sceneId || selected.uuid], Boolean(start.ctrl));
+      else if (!start.ctrl) selectObjectsByIds([], false);
+    };
+    const onKeyDown = (event) => {
+      if ((event.key === "f" || event.key === "F") && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        const ids = selectedObjectsRef.current.map((object) => object.userData?.sceneId || object.uuid);
+        if (ids.length) {
+          const objects = ids.map((id) => findBySceneId(modelRef.current, id)).filter(Boolean);
+          if (objects.length) {
+            const box = new THREE.Box3();
+            objects.forEach((object) => box.expandByObject(object));
+            const camera = getActiveCamera();
+            const controls = controlsRef.current;
+            if (!box.isEmpty() && camera && controls) {
+              const center = box.getCenter(new THREE.Vector3());
+              const size = box.getSize(new THREE.Vector3());
+              const radius = Math.max(size.length() * 0.5, 0.1);
+              const direction = camera.position.clone().sub(controls.target).normalize();
+              controls.target.copy(center);
+              camera.position.copy(center).addScaledVector(direction, radius * 3.2);
+              if (camera.isOrthographicCamera) camera.zoom = Math.max(0.1, 1.7 / radius);
+              camera.updateProjectionMatrix();
+              controls.update();
+            }
+          }
+        }
       }
     };
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("keydown", onKeyDown);
 
     syncControlsCamera();
 
-    const renderLoop = () => {
+    const renderLoop = (time) => {
       controlsRef.current?.update?.();
-      selectionHelperRef.current?.update?.();
+      (selectionHelperRef.current || []).forEach((helper) => helper.update?.());
       renderer.render(scene, getActiveCamera());
+      const metrics = frameMetricsRef.current;
+      metrics.frames += 1;
+      const elapsed = time - metrics.lastTime;
+      if (elapsed >= 500) {
+        metrics.fps = Math.round((metrics.frames * 1000) / Math.max(elapsed, 1));
+        metrics.frames = 0;
+        metrics.lastTime = time;
+
+        if (qualityModeRef.current === "auto" && modelRef.current && !contextLostRef.current) {
+          const adaptive = adaptiveQualityRef.current;
+          if (metrics.fps > 0 && metrics.fps < 24) {
+            adaptive.lowTicks += 1;
+            adaptive.highTicks = 0;
+          } else if (metrics.fps >= 52) {
+            adaptive.highTicks += 1;
+            adaptive.lowTicks = 0;
+          } else {
+            adaptive.lowTicks = Math.max(0, adaptive.lowTicks - 1);
+            adaptive.highTicks = Math.max(0, adaptive.highTicks - 1);
+          }
+
+          const currentIndex = qualityIndex(qualityRef.current);
+          const ceilingIndex = Math.max(0, qualityIndex(autoQualityCeilingRef.current));
+          const now = performance.now();
+          if (adaptive.lowTicks >= 5 && currentIndex > 0 && now - adaptive.lastChange > 2500) {
+            qualityRef.current = ["low", "medium", "high", "ultra"][currentIndex - 1];
+            renderer.setPixelRatio(qualityPixelRatio(qualityRef.current));
+            renderer.shadowMap.enabled = qualityRef.current !== "low" && lightingConfigRef.current?.shadows !== false;
+            adaptive.lowTicks = 0;
+            adaptive.lastChange = now;
+          } else if (adaptive.highTicks >= 12 && currentIndex >= 0 && currentIndex < ceilingIndex && now - adaptive.lastChange > 5000) {
+            qualityRef.current = ["low", "medium", "high", "ultra"][currentIndex + 1];
+            renderer.setPixelRatio(qualityPixelRatio(qualityRef.current));
+            renderer.shadowMap.enabled = qualityRef.current !== "low" && lightingConfigRef.current?.shadows !== false;
+            adaptive.highTicks = 0;
+            adaptive.lastChange = now;
+          }
+        }
+      }
+      if (onPerformanceInfo && time - metrics.lastReport >= 800) {
+        metrics.lastReport = time;
+        const gpu = gpuEstimateRef.current;
+        onPerformanceInfo({
+          fps: metrics.fps,
+          quality: qualityRef.current,
+          calls: renderer.info.render.calls,
+          triangles: renderer.info.render.triangles,
+          points: renderer.info.render.points,
+          lines: renderer.info.render.lines,
+          geometries: renderer.info.memory.geometries,
+          textures: renderer.info.memory.textures,
+          estimatedGpuBytes: gpu.totalBytes,
+          geometryBytes: gpu.geometryBytes,
+          textureBytes: gpu.textureBytes,
+          renderer: renderer.capabilities?.isWebGL2 ? "WebGL2" : "WebGL",
+          gpuName: gpuNameRef.current,
+        });
+      }
       animationRef.current = requestAnimationFrame(renderLoop);
     };
     animationRef.current = requestAnimationFrame(renderLoop);
@@ -754,16 +1789,22 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
       controlsRef.current?.dispose?.();
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("keydown", onKeyDown);
       if (activeLoadRef.current) {
         activeLoadRef.current.cancelled = true;
         activeLoadRef.current.readers.forEach((reader) => reader.abort?.());
+        activeLoadRef.current.worker?.terminate?.();
       }
       if (modelRef.current) disposeObject(modelRef.current);
+      gpuEstimateRef.current = { geometryBytes: 0, textureBytes: 0, totalBytes: 0 };
       objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       objectUrlsRef.current = [];
       disposeMaterial(ground.material);
       ground.geometry.dispose();
       grid.geometry.dispose();
+      canvasContext.removeEventListener("webglcontextlost", onContextLost, false);
+      canvasContext.removeEventListener("webglcontextrestored", onContextRestored, false);
+      environmentTextureRef.current?.dispose?.();
       renderer.dispose();
       renderer.domElement.remove();
       scene.clear();
@@ -780,6 +1821,7 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
     oldControls?.dispose?.();
     controlsRef.current = null;
     syncControlsCamera();
+    emitSceneGraph();
   }, [projectionMode]);
 
   useEffect(() => {
@@ -791,8 +1833,162 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
   }, [showGround]);
 
   useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    const stats = objectStats(modelRef.current);
+    const statsShape = { triangleCount: stats.triangles, vertexCount: stats.vertices };
+    const recommended = qualityForScene(statsShape, totalBytes, "auto");
+    const quality = qualityMode === "auto" ? recommended : qualityForScene(statsShape, totalBytes, qualityMode);
+    autoQualityCeilingRef.current = recommended;
+    adaptiveQualityRef.current = { lowTicks: 0, highTicks: 0, lastChange: performance.now() };
+    qualityRef.current = quality;
+    renderer.setPixelRatio(qualityPixelRatio(quality));
+    renderer.shadowMap.enabled = quality !== "low" && lightingConfig?.shadows !== false;
+  }, [qualityMode, totalBytes, lightingConfig?.shadows]);
+
+  useEffect(() => {
     applyShading(modelRef.current, shadingMode);
   }, [shadingMode]);
+
+  useEffect(() => {
+    const scene = sceneRef.current;
+    const renderer = rendererRef.current;
+    if (!scene || !renderer) return;
+    const config = {
+      preset: "studio",
+      environmentStrength: 1,
+      environmentRotation: 0,
+      keyIntensity: 3.2,
+      fillIntensity: 1.05,
+      rimIntensity: 0.75,
+      ambientIntensity: 0.16,
+      temperature: 6500,
+      shadows: true,
+      transparentBackground: false,
+      ...lightingConfig,
+    };
+    const color = kelvinToColor(config.temperature);
+    const lights = lightsRef.current;
+    if (lights.key) {
+      lights.key.intensity = Math.max(0, Number(config.keyIntensity) || 0);
+      lights.key.color.copy(color);
+      lights.key.castShadow = Boolean(config.shadows) && qualityRef.current !== "low";
+    }
+    if (lights.fill) {
+      lights.fill.intensity = Math.max(0, Number(config.fillIntensity) || 0);
+      lights.fill.color.copy(color);
+    }
+    if (lights.rim) {
+      lights.rim.intensity = Math.max(0, Number(config.rimIntensity) || 0);
+      lights.rim.color.copy(color);
+    }
+    if (lights.ambient) {
+      lights.ambient.intensity = Math.max(0, Number(config.ambientIntensity) || 0);
+      lights.ambient.color.copy(color);
+    }
+    if (lights.hemisphere) lights.hemisphere.intensity = config.preset === "dark" ? 0.35 : config.preset === "outdoor" ? 1.8 : 1.15;
+    renderer.shadowMap.enabled = Boolean(config.shadows) && qualityRef.current !== "low";
+    renderer.setClearAlpha(config.transparentBackground ? 0 : 1);
+
+    const backgroundColors = {
+      studio: 0x202124,
+      neutral: 0x4b4f55,
+      softbox: 0x35383d,
+      outdoor: 0x7f94a8,
+      dark: 0x080a0d,
+      custom: 0x202124,
+    };
+    scene.background = config.transparentBackground ? null : new THREE.Color(backgroundColors[config.preset] ?? 0x202124);
+    if ("environmentIntensity" in scene) scene.environmentIntensity = Math.max(0, Number(config.environmentStrength) || 0);
+    if (scene.environmentRotation?.isEuler) scene.environmentRotation.y = THREE.MathUtils.degToRad(Number(config.environmentRotation) || 0);
+  }, [
+    lightingConfig?.preset,
+    lightingConfig?.environmentStrength,
+    lightingConfig?.environmentRotation,
+    lightingConfig?.keyIntensity,
+    lightingConfig?.fillIntensity,
+    lightingConfig?.rimIntensity,
+    lightingConfig?.ambientIntensity,
+    lightingConfig?.temperature,
+    lightingConfig?.shadows,
+    lightingConfig?.transparentBackground,
+  ]);
+
+  useEffect(() => {
+    const scene = sceneRef.current;
+    const renderer = rendererRef.current;
+    if (!scene || !renderer) return undefined;
+    let cancelled = false;
+    const preset = lightingConfig?.preset || "studio";
+
+    const setEnvironmentTexture = (texture) => {
+      if (cancelled) {
+        texture?.dispose?.();
+        return;
+      }
+      environmentTextureRef.current?.dispose?.();
+      environmentTextureRef.current = texture || null;
+      scene.environment = texture || null;
+    };
+
+    const setupEnvironment = async () => {
+      let sourceTexture = null;
+      let temporaryUrl = "";
+      try {
+        if (customEnvironmentFile && preset === "custom") {
+          const ext = extensionOf(customEnvironmentFile.name);
+          temporaryUrl = URL.createObjectURL(customEnvironmentFile);
+          if (ext === "exr") {
+            const { EXRLoader } = await loaderImports.exr();
+            sourceTexture = await new EXRLoader().loadAsync(temporaryUrl);
+          } else {
+            const { HDRLoader } = await loaderImports.hdr();
+            sourceTexture = await new HDRLoader().loadAsync(temporaryUrl);
+          }
+          if (cancelled) return;
+          sourceTexture.mapping = THREE.EquirectangularReflectionMapping;
+          const pmrem = new THREE.PMREMGenerator(renderer);
+          try {
+            pmrem.compileEquirectangularShader();
+            setEnvironmentTexture(pmrem.fromEquirectangular(sourceTexture).texture);
+          } finally {
+            pmrem.dispose();
+          }
+          return;
+        }
+        if (["studio", "softbox", "neutral"].includes(preset)) {
+          const { RoomEnvironment } = await import("three/addons/environments/RoomEnvironment.js");
+          if (cancelled) return;
+          const pmrem = new THREE.PMREMGenerator(renderer);
+          const envScene = new RoomEnvironment();
+          try {
+            pmrem.compileEquirectangularShader();
+            setEnvironmentTexture(pmrem.fromScene(envScene, preset === "softbox" ? 0.08 : 0.04).texture);
+          } finally {
+            envScene.dispose?.();
+            pmrem.dispose();
+          }
+          return;
+        }
+        setEnvironmentTexture(null);
+      } catch (error) {
+        console.warn("Environment setup failed", error);
+        if (!cancelled) onError?.(`Lighting environment: ${error?.message || "could not load environment"}`);
+      } finally {
+        sourceTexture?.dispose?.();
+        if (temporaryUrl) URL.revokeObjectURL(temporaryUrl);
+      }
+    };
+    setupEnvironment();
+    return () => { cancelled = true; };
+  }, [lightingConfig?.preset, customEnvironmentFile]);
+
+
+  useEffect(() => {
+    if (!modelRef.current) return;
+    const ids = Array.isArray(selectedObjectIds) ? selectedObjectIds : [];
+    selectObjectsByIds(ids, false);
+  }, [selectedObjectIds]);
 
   useEffect(() => {
     const object = modelRef.current;
@@ -825,7 +2021,7 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
       modelRadiusRef.current = Math.max(size.length() * 0.5, 0.25);
       modelTargetRef.current.copy(center);
     }
-    selectionHelperRef.current?.update?.();
+    (selectionHelperRef.current || []).forEach((helper) => helper.update?.());
   }, [modelTransform]);
 
   useEffect(() => {
@@ -847,12 +2043,21 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
     const objectUrls = [];
     objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     objectUrlsRef.current = objectUrls;
-    const active = { cancelled: false, finished: false, readers: new Set() };
+    const active = { cancelled: false, finished: false, readers: new Set(), worker: null, workerReject: null, fileProgress: null };
     activeLoadRef.current = active;
+    active.fileProgress = (readingFile, loaded, total) => {
+      if (active.cancelled || active.finished || !total) return;
+      const ratio = loaded / total;
+      setProgress(18 + ratio * 12, `Reading ${readingFile.name} · ${Math.round(ratio * 100)}%`);
+    };
 
     const cancel = () => {
       active.cancelled = true;
       active.readers.forEach((reader) => reader.abort?.());
+      active.worker?.terminate?.();
+      active.worker = null;
+      active.workerReject?.(new DOMException("Model loading cancelled", "AbortError"));
+      active.workerReject = null;
       setStatus("cancelled");
       setProgressState(0);
       setProgressLabel("Loading cancelled");
@@ -862,8 +2067,11 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
 
     async function start() {
       setStatus("loading");
-      setSelectedName("");
-      onSelectionChange?.(null);
+      selectedObjectsRef.current = [];
+      setSelectedNames([]);
+      refreshSelectionHelpers([]);
+      onSelectionChange?.([]);
+      onMaterialInfo?.({ selectedIds: [], materials: [] });
       setProgress(4, "Scanning model bundle");
       try {
         const dependencies = await analyzeDependencies(mainFile, files);
@@ -871,8 +2079,14 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
         setProgress(12, "Checking linked files");
 
         const manager = new THREE.LoadingManager();
-        manager.addHandler(/\.tga(?:$|[?#])/i, new TGALoader(manager));
-        manager.addHandler(/\.dds(?:$|[?#])/i, new DDSLoader(manager));
+        if (files.some((item) => extensionOf(item.name) === "tga")) {
+          const { TGALoader } = await loaderImports.tga();
+          manager.addHandler(/\.tga(?:$|[?#])/i, new TGALoader(manager));
+        }
+        if (files.some((item) => extensionOf(item.name) === "dds")) {
+          const { DDSLoader } = await loaderImports.dds();
+          manager.addHandler(/\.dds(?:$|[?#])/i, new DDSLoader(manager));
+        }
         manager.setURLModifier(buildFileResolver(files, objectUrls));
         manager.onProgress = (_url, loaded, total) => {
           if (!active.cancelled && !active.finished && total > 0) setProgress(64 + (loaded / total) * 18, `Loading linked resources ${loaded}/${total}`);
@@ -881,7 +2095,7 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
           if (!active.cancelled) console.warn("Three.js resource could not be resolved:", url);
         };
 
-        const object = await loadModel(mainFile, files, manager, active, setProgress);
+        const object = await loadModel(mainFile, files, manager, active, setProgress, rendererRef.current);
         if (active.cancelled) {
           disposeObject(object);
           return;
@@ -891,13 +2105,24 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
         if (modelRef.current) {
           scene.remove(modelRef.current);
           disposeObject(modelRef.current);
+          gpuEstimateRef.current = { geometryBytes: 0, textureBytes: 0, totalBytes: 0 };
         }
-        if (selectionHelperRef.current) {
-          scene.remove(selectionHelperRef.current);
-          selectionHelperRef.current = null;
+        for (const helper of selectionHelperRef.current || []) {
+          scene.remove(helper);
+          helper.geometry?.dispose?.();
+          disposeMaterial(helper.material);
         }
+        selectionHelperRef.current = [];
 
-        const stats = prepareObject(object);
+        const stats = await prepareObject(
+          object,
+          (ratio) => setProgress(78 + ratio * 9, `Preparing scene ${Math.round(ratio * 100)}%`),
+          () => active.cancelled,
+        );
+        if (active.cancelled) {
+          disposeObject(object);
+          return;
+        }
         const normalized = normalizeAndGroundObject(object);
         modelRadiusRef.current = normalized.radius;
         modelTargetRef.current.copy(normalized.target);
@@ -935,12 +2160,24 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
           modelTargetRef.current.copy(transformedCenter);
           baseFocusTargetRef.current.copy(transformedCenter);
         }
+        ensureSceneIds(object);
         scene.add(object);
         modelRef.current = object;
         applyShading(object, shadingMode);
 
+        const recommendedQuality = qualityForScene(stats, totalBytes, "auto");
+        const selectedQuality = qualityMode === "auto" ? recommendedQuality : qualityForScene(stats, totalBytes, qualityMode);
+        autoQualityCeilingRef.current = recommendedQuality;
+        adaptiveQualityRef.current = { lowTicks: 0, highTicks: 0, lastChange: performance.now() };
+        qualityRef.current = selectedQuality;
+        if (rendererRef.current) {
+          rendererRef.current.setPixelRatio(qualityPixelRatio(selectedQuality));
+          rendererRef.current.shadowMap.enabled = selectedQuality !== "low" && lightingConfigRef.current?.shadows !== false;
+        }
         const warnings = warningsForStats(stats, totalBytes, dependencies);
+        if (selectedQuality === "low") warnings.push("Automatic quality lowered to protect frame rate and memory on this device/model.");
         const format = extensionOf(mainFile.name).toUpperCase();
+        const gpuEstimate = refreshGpuEstimate();
         const info = {
           format,
           meshes: stats.meshCount,
@@ -953,6 +2190,9 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
           warnings,
           objectNames: stats.names,
           grounded: true,
+          quality: selectedQuality,
+          workerParsed: Boolean(object.userData?.importMaterialInfo?.workerParsed),
+          gpuEstimate,
           materials: {
             count: stats.materialCount,
             textured: stats.texturedMaterialCount,
@@ -963,8 +2203,10 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
             hasMaterialLibrary: Boolean(object.userData?.importMaterialInfo?.hasMaterialLibrary),
           },
         };
-        setProgress(94, "Framing camera");
+        setProgress(94, "Building scene index");
         onModelInfo?.(info);
+        emitSceneGraph();
+        emitMaterialInfo();
 
         // Rebuild controls so the orbit target is the normalized model center.
         controlsRef.current?.userDataCleanup?.();
@@ -994,6 +2236,10 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
     return () => {
       active.cancelled = true;
       active.readers.forEach((reader) => reader.abort?.());
+      active.worker?.terminate?.();
+      active.worker = null;
+      active.workerReject?.(new DOMException("Model loading cancelled", "AbortError"));
+      active.workerReject = null;
       for (const url of objectUrls) URL.revokeObjectURL(url);
       if (activeLoadRef.current === active) activeLoadRef.current = null;
     };
@@ -1060,7 +2306,7 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
       <div className="threeViewportAxisGizmo" aria-hidden="true">
         <span className="axisX">X</span><span className="axisY">Y</span><span className="axisZ">Z</span>
       </div>
-      {selectedName && <div className="threeSelectionBadge">Selected: {selectedName}</div>}
+      {selectedNames.length > 0 && <div className="threeSelectionBadge">Selected: {selectedNames.length === 1 ? selectedNames[0] : `${selectedNames.length} objects`}</div>}
       {status === "loading" && (
         <div className="threeModelLoadOverlay">
           <div className="threeModelLoadHead"><strong>Loading 3D model</strong><span>{progress}%</span></div>
@@ -1072,6 +2318,7 @@ const ThreeModelViewport = forwardRef(function ThreeModelViewport({
       {status === "cancelled" && (
         <div className="threeModelStatus threeModelRetryStatus">Model loading cancelled <button type="button" onClick={() => setReloadToken((value) => value + 1)}>Reload</button></div>
       )}
+      {status === "context-lost" && <div className="threeModelStatus error">WebGL context lost — waiting for browser recovery…</div>}
       {status === "error" && (
         <div className="threeModelStatus error threeModelRetryStatus">{progressLabel || "3D model could not be rendered"} <button type="button" onClick={() => setReloadToken((value) => value + 1)}>Retry</button></div>
       )}

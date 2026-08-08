@@ -1,22 +1,37 @@
 import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   Aperture,
+  Box,
   Camera,
   Check,
   ChevronDown,
   Copy,
+  CopyPlus,
   Crosshair,
   Download,
+  Eye,
+  EyeOff,
+  FileJson,
   FolderOpen,
   ImagePlus,
+  Layers,
+  Lightbulb,
+  Lock,
   Orbit,
+  Palette,
   Rotate3d,
+  RotateCcw,
   Save,
+  Search,
+  SunMedium,
   Trash2,
+  Unlock,
   UploadCloud,
   X,
   Zap,
 } from "lucide-react";
+import ViewportErrorBoundary from "./ViewportErrorBoundary.jsx";
 const ThreeModelViewport = lazy(() => import("./ThreeModelViewport.jsx"));
 
 const ANGLES = [
@@ -51,14 +66,14 @@ const TARGET_CAMERA_SPECS = {
 };
 
 const MODEL_EXTENSIONS = ["obj", "stl", "ply", "glb", "gltf", "fbx", "dae", "3mf", "3ds"];
-const MODEL_COMPANION_EXTENSIONS = ["mtl", "bin", "png", "jpg", "jpeg", "webp", "bmp", "tga", "dds", "gif"];
+const MODEL_COMPANION_EXTENSIONS = ["mtl", "bin", "drc", "png", "jpg", "jpeg", "webp", "bmp", "tga", "dds", "ktx2", "gif", "tif", "tiff"];
 const FILE_ACCEPT = [
   "image/png", "image/jpeg", "image/webp",
   ...MODEL_EXTENSIONS.map((ext) => `.${ext}`),
   ...MODEL_COMPANION_EXTENSIONS.map((ext) => `.${ext}`),
 ].join(",");
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
-const MAX_MODEL_BUNDLE_BYTES = 250 * 1024 * 1024;
+const MAX_MODEL_BUNDLE_BYTES = 500 * 1024 * 1024;
 
 function extensionFromName(name = "") {
   const parts = name.toLowerCase().split(".");
@@ -413,6 +428,45 @@ const DEFAULT_MODEL_TRANSFORM = {
   scale: { x: 1, y: 1, z: 1 },
 };
 
+const DEFAULT_LIGHTING = {
+  preset: "studio",
+  environmentStrength: 1,
+  environmentRotation: 0,
+  keyIntensity: 3.2,
+  fillIntensity: 1.05,
+  rimIntensity: 0.75,
+  ambientIntensity: 0.16,
+  temperature: 6500,
+  shadows: true,
+  transparentBackground: false,
+};
+
+const DEFAULT_EXPORT = {
+  format: "png",
+  scale: 1,
+  customWidth: 1920,
+  customHeight: 1080,
+  transparent: false,
+  quality: 0.94,
+};
+
+const LIGHTING_PRESETS = [
+  { key: "studio", label: "Studio HDRI", sub: "Balanced product lighting" },
+  { key: "neutral", label: "Neutral", sub: "Flat neutral environment" },
+  { key: "softbox", label: "Softbox", sub: "Soft commercial highlights" },
+  { key: "outdoor", label: "Outdoor", sub: "Brighter ambient fill" },
+  { key: "dark", label: "Dark Studio", sub: "Low-key contrast" },
+  { key: "custom", label: "Custom HDRI", sub: "Upload HDR / EXR" },
+];
+
+const LIGHTING_RECIPES = {
+  studio: { preset: "studio", environmentStrength: 1, keyIntensity: 3.2, fillIntensity: 1.05, rimIntensity: 0.75, ambientIntensity: 0.16, temperature: 6500 },
+  neutral: { preset: "neutral", environmentStrength: 0.75, keyIntensity: 2.25, fillIntensity: 1.4, rimIntensity: 0.35, ambientIntensity: 0.28, temperature: 6500 },
+  softbox: { preset: "softbox", environmentStrength: 1.2, keyIntensity: 2.4, fillIntensity: 1.65, rimIntensity: 0.55, ambientIntensity: 0.2, temperature: 5600 },
+  outdoor: { preset: "outdoor", environmentStrength: 0.35, keyIntensity: 4.2, fillIntensity: 1.15, rimIntensity: 0.25, ambientIntensity: 0.42, temperature: 6200 },
+  dark: { preset: "dark", environmentStrength: 0.2, keyIntensity: 2.9, fillIntensity: 0.3, rimIntensity: 1.45, ambientIntensity: 0.04, temperature: 5000 },
+};
+
 function cloneDefaultModelTransform() {
   return {
     position: { ...DEFAULT_MODEL_TRANSFORM.position },
@@ -451,9 +505,29 @@ function normalizeProjectTransform(value) {
   };
 }
 
+
+function filterSceneTree(node, query = "") {
+  if (!node) return null;
+  const text = String(query || "").trim().toLowerCase();
+  if (!text) return node;
+  const children = (node.children || []).map((child) => filterSceneTree(child, text)).filter(Boolean);
+  if (String(node.name || "").toLowerCase().includes(text) || String(node.type || "").toLowerCase().includes(text) || children.length) {
+    return { ...node, children };
+  }
+  return null;
+}
+
+function countSceneNodes(node) {
+  if (!node) return 0;
+  return 1 + (node.children || []).reduce((sum, child) => sum + countSceneNodes(child), 0);
+}
+
 function App() {
   const inputRef = useRef(null);
   const projectFileInputRef = useRef(null);
+  const environmentInputRef = useRef(null);
+  const materialTextureInputRef = useRef(null);
+  const relinkFilesInputRef = useRef(null);
   const threeViewportRef = useRef(null);
   const cameraStageRef = useRef(null);
   const orbitDragRef = useRef(null);
@@ -474,6 +548,25 @@ function App() {
   const [modelTransformResetSignal, setModelTransformResetSignal] = useState(0);
   const [modelTransform, setModelTransform] = useState(() => cloneDefaultModelTransform());
   const [selectedModelObject, setSelectedModelObject] = useState(null);
+  const [selectedSceneIds, setSelectedSceneIds] = useState([]);
+  const [sceneGraph, setSceneGraph] = useState(null);
+  const [outlinerSearch, setOutlinerSearch] = useState("");
+  const [collapsedSceneIds, setCollapsedSceneIds] = useState(() => new Set());
+  const [materialInfo, setMaterialInfo] = useState({ selectedIds: [], materials: [] });
+  const [activeMaterialId, setActiveMaterialId] = useState("");
+  const [materialTextureSlot, setMaterialTextureSlot] = useState("map");
+  const [lightingConfig, setLightingConfig] = useState(() => ({ ...DEFAULT_LIGHTING }));
+  const [customEnvironmentFile, setCustomEnvironmentFile] = useState(null);
+  const [performanceInfo, setPerformanceInfo] = useState({ fps: 0, quality: "auto", calls: 0, triangles: 0, geometries: 0, textures: 0, estimatedGpuBytes: 0 });
+  const [qualityMode, setQualityMode] = useState("auto");
+  const [debugEnabled, setDebugEnabled] = useState(false);
+  const [exportConfig, setExportConfig] = useState(() => ({ ...DEFAULT_EXPORT }));
+  const [savedCameras, setSavedCameras] = useState(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem("multiview-v8-saved-cameras") || "[]");
+      return Array.isArray(parsed) ? parsed.slice(0, 20) : [];
+    } catch { return []; }
+  });
   const [projectName, setProjectName] = useState("Untitled Camera Studio");
   const [lastSavedAt, setLastSavedAt] = useState("");
   const [savedProjects, setSavedProjects] = useState(() => {
@@ -519,6 +612,10 @@ function App() {
   const cameraSummary = useMemo(() => describeCamera(camera), [camera]);
   const nearestPreset = useMemo(() => nearestPresetFromCamera(camera), [camera]);
   const orbitSensitivityFactor = orbitSensitivity === "precision" ? 0.32 : orbitSensitivity === "fast" ? 1.15 : 0.68;
+  const filteredSceneGraph = useMemo(() => filterSceneTree(sceneGraph, outlinerSearch), [sceneGraph, outlinerSearch]);
+  const sceneNodeCount = useMemo(() => countSceneNodes(sceneGraph), [sceneGraph]);
+  const filteredSceneNodeCount = useMemo(() => countSceneNodes(filteredSceneGraph), [filteredSceneGraph]);
+  const activeMaterial = useMemo(() => materialInfo.materials.find((item) => item.id === activeMaterialId) || materialInfo.materials[0] || null, [materialInfo, activeMaterialId]);
 
   useEffect(() => {
     return () => {
@@ -541,6 +638,24 @@ function App() {
       // Local storage can be unavailable in private/restricted browser modes.
     }
   }, [recentImports]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("multiview-v8-saved-cameras", JSON.stringify(savedCameras.slice(0, 20)));
+    } catch {
+      // Local storage can be unavailable in private/restricted browser modes.
+    }
+  }, [savedCameras]);
+
+  useEffect(() => {
+    if (!materialInfo.materials.length) {
+      setActiveMaterialId("");
+      return;
+    }
+    if (!materialInfo.materials.some((item) => item.id === activeMaterialId)) {
+      setActiveMaterialId(materialInfo.materials[0].id);
+    }
+  }, [materialInfo, activeMaterialId]);
 
   useEffect(() => {
     return () => {
@@ -654,7 +769,7 @@ function App() {
     if (modelMain) {
       const totalBytes = files.reduce((sum, item) => sum + (item.size || 0), 0);
       if (totalBytes > MAX_MODEL_BUNDLE_BYTES) {
-        setError("3D model bundle must be 250 MB or smaller.");
+        setError("3D model bundle must be 500 MB or smaller.");
         return false;
       }
       if (preview) URL.revokeObjectURL(preview);
@@ -665,6 +780,11 @@ function App() {
       setModelInfo(null);
       setModelLoadState({ status: "loading", progress: 0, label: "Queued" });
       setSelectedModelObject(null);
+      setSelectedSceneIds([]);
+      setSceneGraph(null);
+      setCollapsedSceneIds(new Set());
+      setMaterialInfo({ selectedIds: [], materials: [] });
+      setActiveMaterialId("");
       setModelTransform(cloneDefaultModelTransform());
       setModelTransformResetSignal((value) => value + 1);
       setImageInputMethod(inputMethod);
@@ -698,6 +818,11 @@ function App() {
       setModelInfo(null);
       setModelLoadState({ status: "idle", progress: 0, label: "" });
       setSelectedModelObject(null);
+      setSelectedSceneIds([]);
+      setSceneGraph(null);
+      setCollapsedSceneIds(new Set());
+      setMaterialInfo({ selectedIds: [], materials: [] });
+      setActiveMaterialId("");
       setModelTransform(cloneDefaultModelTransform());
       setPreview(URL.createObjectURL(imageMain));
       setImageInputMethod(inputMethod);
@@ -795,6 +920,11 @@ function App() {
     setModelInfo(null);
     setModelLoadState({ status: "idle", progress: 0, label: "" });
     setSelectedModelObject(null);
+    setSelectedSceneIds([]);
+    setSceneGraph(null);
+    setCollapsedSceneIds(new Set());
+    setMaterialInfo({ selectedIds: [], materials: [] });
+    setActiveMaterialId("");
     setModelTransform(cloneDefaultModelTransform());
     setModelTransformResetSignal((value) => value + 1);
     setImageInputMethod("");
@@ -1130,6 +1260,16 @@ function App() {
     scrollToPanel(".settingsPanel");
   }
 
+  function openStudioWorkspace(tab, selector) {
+    setWorkspaceTab(tab);
+    if (assetType === "model") setAngleMode("3d");
+    window.requestAnimationFrame(() => {
+      const element = document.querySelector(selector);
+      if (element instanceof HTMLDetailsElement) element.open = true;
+      element?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }
+
   function handleModelCameraChange(nextCamera) {
     if (!nextCamera) return;
     stopAutoOrbit();
@@ -1176,6 +1316,190 @@ function App() {
     resetRunState();
   }
 
+  function toggleSceneCollapsed(id) {
+    if (!id) return;
+    setCollapsedSceneIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function handleSceneSelection(items) {
+    const list = Array.isArray(items) ? items : items ? [items] : [];
+    const ids = list.map((item) => item.id || item.uuid).filter(Boolean);
+    setSelectedSceneIds((current) => current.length === ids.length && current.every((value, index) => value === ids[index]) ? current : ids);
+    setSelectedModelObject(list[0] || null);
+  }
+
+  function selectOutlinerObject(id, additive = false) {
+    if (!id || ["scene-root", "camera-node", "lights-node"].includes(id)) return;
+    const selection = threeViewportRef.current?.selectObjects?.([id], additive) || [];
+    handleSceneSelection(selection);
+  }
+
+  function renameOutlinerObject(id, currentName = "Object") {
+    const next = window.prompt("Rename object", currentName);
+    if (!next?.trim()) return;
+    threeViewportRef.current?.renameObject?.(id, next.trim());
+  }
+
+  function toggleOutlinerVisibility(node) {
+    threeViewportRef.current?.setObjectVisibility?.(node.id, !node.visible);
+  }
+
+  function toggleOutlinerLock(node) {
+    threeViewportRef.current?.setObjectLocked?.(node.id, !node.locked);
+  }
+
+  function duplicateSelectedObjects() {
+    if (!selectedSceneIds.length) return;
+    const ids = threeViewportRef.current?.duplicateObjects?.(selectedSceneIds) || [];
+    if (ids.length) setSelectedSceneIds(ids);
+  }
+
+  function deleteSelectedObjects() {
+    if (!selectedSceneIds.length) return;
+    if (!window.confirm(`Delete ${selectedSceneIds.length} selected object${selectedSceneIds.length === 1 ? "" : "s"}?`)) return;
+    threeViewportRef.current?.deleteObjects?.(selectedSceneIds);
+    setSelectedSceneIds([]);
+    setSelectedModelObject(null);
+  }
+
+  function isolateSelectedObjects() {
+    if (!selectedSceneIds.length) return;
+    threeViewportRef.current?.isolateObjects?.(selectedSceneIds);
+  }
+
+  function frameSelectedObjects() {
+    if (!selectedSceneIds.length) return;
+    threeViewportRef.current?.frameSelection?.(selectedSceneIds);
+  }
+
+  function updateActiveMaterial(patch) {
+    if (!activeMaterialId) return;
+    threeViewportRef.current?.updateMaterial?.(activeMaterialId, patch);
+  }
+
+  function requestMaterialTexture(slot = "map") {
+    if (!activeMaterialId || !materialTextureInputRef.current) return;
+    setMaterialTextureSlot(slot);
+    materialTextureInputRef.current.value = "";
+    materialTextureInputRef.current.click();
+  }
+
+  async function handleMaterialTextureFile(fileToApply) {
+    if (!fileToApply || !activeMaterialId) return;
+    try {
+      const changed = await threeViewportRef.current?.setMaterialTexture?.(activeMaterialId, fileToApply, materialTextureSlot || "map");
+      if (!changed) throw new Error(`The selected material does not support ${materialTextureSlot || "map"}.`);
+      setError("");
+    } catch (textureError) {
+      setError(`Texture could not be applied: ${textureError?.message || "unknown error"}`);
+    }
+  }
+
+  function openRelinkFilesPicker() {
+    if (!relinkFilesInputRef.current || assetType !== "model") return;
+    relinkFilesInputRef.current.value = "";
+    relinkFilesInputRef.current.click();
+  }
+
+  function mergeRelinkFiles(extraFiles) {
+    if (assetType !== "model") return;
+    const incoming = Array.from(extraFiles || []).filter(Boolean);
+    if (!incoming.length) return;
+    const mergedMap = new Map();
+    [...fileBundle, ...incoming].forEach((item) => {
+      const key = String(item.webkitRelativePath || item.name || "").replace(/\\/g, "/").toLowerCase();
+      if (key) mergedMap.set(key, item);
+    });
+    chooseFiles(Array.from(mergedMap.values()), "relink");
+  }
+
+  async function handleMaterialTextureDrop(event, slot = "map") {
+    event.preventDefault();
+    if (!activeMaterialId) return;
+    const dropped = Array.from(event.dataTransfer?.files || []);
+    const texture = dropped.find((item) => ["png", "jpg", "jpeg", "webp", "bmp", "tga", "dds", "ktx2"].includes(extensionFromName(item.name)));
+    if (!texture) {
+      setError("Drop a PNG/JPG/WEBP/BMP/TGA/DDS/KTX2 texture file.");
+      return;
+    }
+    setMaterialTextureSlot(slot);
+    try {
+      const changed = await threeViewportRef.current?.setMaterialTexture?.(activeMaterialId, texture, slot);
+      if (!changed) throw new Error(`The selected material does not support ${slot}.`);
+      setError("");
+    } catch (textureError) {
+      setError(`Texture could not be applied: ${textureError?.message || "unknown error"}`);
+    }
+  }
+
+  function updateLighting(patch) {
+    setLightingConfig((current) => ({ ...current, ...patch }));
+  }
+
+  function applyLightingPreset(key) {
+    if (key === "custom") {
+      openEnvironmentPicker();
+      return;
+    }
+    const recipe = LIGHTING_RECIPES[key];
+    if (recipe) setLightingConfig((current) => ({ ...current, ...recipe }));
+  }
+
+  function openEnvironmentPicker() {
+    if (!environmentInputRef.current) return;
+    environmentInputRef.current.value = "";
+    environmentInputRef.current.click();
+  }
+
+  function chooseEnvironmentFile(fileToUse) {
+    if (!fileToUse) return;
+    const ext = extensionFromName(fileToUse.name);
+    if (!["hdr", "exr"].includes(ext)) {
+      setError("Custom lighting environment must be an .hdr or .exr file.");
+      return;
+    }
+    setCustomEnvironmentFile(fileToUse);
+    updateLighting({ preset: "custom" });
+    setError("");
+  }
+
+  function saveCurrentCamera() {
+    const snapshot = {
+      id: `camera-${Date.now()}`,
+      name: `Camera ${savedCameras.length + 1}`,
+      savedAt: new Date().toISOString(),
+      camera: { ...camera },
+      lensPreset,
+      projection: viewportProjection,
+      focusPoint,
+      focusPosition: { ...focusPosition },
+    };
+    setSavedCameras((current) => [snapshot, ...current].slice(0, 20));
+  }
+
+  function applySavedCamera(saved) {
+    if (!saved?.camera) return;
+    takeManualCameraControl();
+    setCamera({
+      azimuth: normalizeAzimuth(numberOr(saved.camera.azimuth, 35)),
+      elevation: clamp(numberOr(saved.camera.elevation, 25), -89, 89),
+      distance: clamp(numberOr(saved.camera.distance, 38), 0, 100),
+    });
+    if (saved.lensPreset) setLensPreset(saved.lensPreset);
+    if (saved.projection) setViewportProjection(saved.projection === "orthographic" ? "orthographic" : "perspective");
+    if (saved.focusPoint) setFocusPoint(saved.focusPoint);
+    if (saved.focusPosition) setFocusPosition({ x: clamp(numberOr(saved.focusPosition.x, 50), 0, 100), y: clamp(numberOr(saved.focusPosition.y, 49), 0, 100) });
+  }
+
+  function deleteSavedCamera(id) {
+    setSavedCameras((current) => current.filter((item) => item.id !== id));
+  }
+
   function createProjectSnapshot() {
     const assetFiles = fileBundle.map((item) => ({
       name: item.name,
@@ -1185,7 +1509,7 @@ function App() {
     }));
     return {
       format: "multiview-camera-studio",
-      version: "8.0",
+      version: "8.9",
       projectName: safeProjectName(projectName),
       savedAt: new Date().toISOString(),
       asset: {
@@ -1208,7 +1532,12 @@ function App() {
         shading: viewportShading,
         grid: viewportGrid,
         ground: viewportGround,
+        qualityMode,
+        debugEnabled,
       },
+      lighting: { ...lightingConfig, customEnvironmentName: customEnvironmentFile?.name || "" },
+      exportSettings: { ...exportConfig },
+      savedCameras: savedCameras.slice(0, 20),
       objectTransform: normalizeProjectTransform(modelTransform),
       prompt: {
         angleMode,
@@ -1256,6 +1585,12 @@ function App() {
     setViewportShading(["material", "solid", "wireframe", "normal"].includes(viewport.shading) ? viewport.shading : "material");
     setViewportGrid(viewport.grid !== false);
     setViewportGround(viewport.ground !== false);
+    setQualityMode(["auto", "low", "medium", "high", "ultra"].includes(viewport.qualityMode) ? viewport.qualityMode : "auto");
+    setDebugEnabled(Boolean(viewport.debugEnabled));
+    setLightingConfig({ ...DEFAULT_LIGHTING, ...(snapshot.lighting || {}) });
+    setCustomEnvironmentFile(null);
+    setExportConfig({ ...DEFAULT_EXPORT, ...(snapshot.exportSettings || {}) });
+    setSavedCameras(Array.isArray(snapshot.savedCameras) ? snapshot.savedCameras.slice(0, 20) : []);
     setModelTransform(normalizeProjectTransform(snapshot.objectTransform));
     setAngleMode(prompt.angleMode === "preset" ? "preset" : "3d");
     setSelected(Array.isArray(prompt.selectedAngles) && prompt.selectedAngles.length ? prompt.selectedAngles.filter((key) => ANGLES.some((item) => item.key === key)) : ["front45"]);
@@ -1339,7 +1674,7 @@ function App() {
     });
     const payload = {
       format: "multiview-camera-json",
-      version: "8.0",
+      version: "8.9",
       projectName: safeProjectName(projectName),
       exportedAt: new Date().toISOString(),
       targetCamera: targetSpec,
@@ -1361,22 +1696,175 @@ function App() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
 
-  async function exportViewportScreenshot() {
+  async function exportViewportScreenshot(overrides = {}) {
     if (assetType !== "model" || modelLoadState.status !== "ready") {
       setError("Load a ready 3D model before exporting a viewport screenshot.");
       return;
     }
     try {
-      const blob = await threeViewportRef.current?.captureScreenshot?.();
+      const config = { ...exportConfig, ...overrides };
+      const format = ["png", "jpeg", "webp"].includes(config.format) ? config.format : "png";
+      const mimeType = format === "jpeg" ? "image/jpeg" : format === "webp" ? "image/webp" : "image/png";
+      const isCustom = config.scale === "custom";
+      const blob = await threeViewportRef.current?.captureScreenshot?.({
+        mimeType,
+        quality: Number(config.quality) || 0.94,
+        transparent: Boolean(config.transparent && format === "png"),
+        scale: isCustom ? 1 : Number(config.scale) || 1,
+        width: isCustom ? Math.max(64, Math.min(8192, Number(config.customWidth) || 1920)) : undefined,
+        height: isCustom ? Math.max(64, Math.min(8192, Number(config.customHeight) || 1080)) : undefined,
+      });
       if (!blob) throw new Error("Viewport capture returned no image.");
       const url = URL.createObjectURL(blob);
-      triggerDownload(url, projectFileName(projectName, "viewport.png"));
+      triggerDownload(url, projectFileName(projectName, `viewport.${format === "jpeg" ? "jpg" : format}`));
       window.setTimeout(() => URL.revokeObjectURL(url), 1500);
       setError("");
     } catch (captureError) {
       setError(`Screenshot failed: ${captureError?.message || "unknown error"}`);
     }
   }
+
+  function downloadJson(payload, suffix) {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    triggerDownload(url, projectFileName(projectName, suffix));
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  function exportSceneJson() {
+    downloadJson({
+      format: "multiview-scene-json",
+      version: "8.9",
+      projectName: safeProjectName(projectName),
+      exportedAt: new Date().toISOString(),
+      scene: threeViewportRef.current?.getSceneSnapshot?.() || sceneGraph,
+      modelInfo,
+      lighting: lightingConfig,
+      viewport: { projection: viewportProjection, shading: viewportShading, grid: viewportGrid, ground: viewportGround, qualityMode },
+    }, "scene.json");
+  }
+
+  function exportTransformJson() {
+    downloadJson({
+      format: "multiview-transform-json",
+      version: "8.9",
+      projectName: safeProjectName(projectName),
+      exportedAt: new Date().toISOString(),
+      modelTransform: normalizeProjectTransform(modelTransform),
+      selectedObjects: selectedSceneIds,
+    }, "transform.json");
+  }
+
+  function exportPromptTxt() {
+    const promptText = results.length
+      ? results.map((result, index) => `# Camera Prompt ${index + 1}\n\n${result.prompt}`).join("\n\n------------------------------\n\n")
+      : buildLocalPrompt({
+          currentViewKey,
+          targetKey: angleMode === "3d" ? "custom3d" : (selected[0] || "front45"),
+          camera,
+          cameraSummary,
+          background,
+          size,
+          customPrompt,
+          lensPreset,
+          focusPoint,
+          focusPosition,
+          assetType,
+          modelFormat,
+          projectionMode: assetType === "model" ? viewportProjection : "perspective",
+          modelTransform,
+        });
+    const blob = new Blob([promptText], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    triggerDownload(url, projectFileName(projectName, "prompt.txt"));
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  async function copyCameraConfiguration() {
+    const targetSpec = getTargetCameraSpec({
+      targetKey: angleMode === "3d" ? "custom3d" : (selected[0] || "front45"),
+      camera,
+      cameraSummary,
+      lensPreset,
+      focusPoint,
+      focusPosition,
+      size,
+      projectionMode: assetType === "model" ? viewportProjection : "perspective",
+    });
+    const text = [
+      "Target camera:",
+      `View: ${targetSpec.view}`,
+      `Azimuth: ${targetSpec.azimuth}°`,
+      `Elevation: ${targetSpec.elevation}°`,
+      `Distance: ${targetSpec.distance}`,
+      `Lens / FOV: ${targetSpec.lens}`,
+      `Projection: ${targetSpec.projection}`,
+      `Focus target: ${targetSpec.focus}`,
+      `Framing: ${targetSpec.framing}`,
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setError("");
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+  }
+
+  async function batchExportSavedCameras() {
+    if (assetType !== "model" || modelLoadState.status !== "ready") {
+      setError("Load a ready 3D model before batch exporting cameras.");
+      return;
+    }
+    if (!savedCameras.length) {
+      setError("Save at least one camera before batch exporting screenshots.");
+      return;
+    }
+    const original = { camera: { ...camera }, lensPreset, viewportProjection, focusPoint, focusPosition: { ...focusPosition } };
+    try {
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      for (let index = 0; index < savedCameras.length; index += 1) {
+        const saved = savedCameras[index];
+        applySavedCamera(saved);
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        const batchFormat = ["png", "jpeg", "webp"].includes(exportConfig.format) ? exportConfig.format : "png";
+        const batchMime = batchFormat === "jpeg" ? "image/jpeg" : batchFormat === "webp" ? "image/webp" : "image/png";
+        const custom = exportConfig.scale === "custom";
+        const blob = await threeViewportRef.current?.captureScreenshot?.({
+          mimeType: batchMime,
+          quality: Number(exportConfig.quality) || 0.94,
+          transparent: Boolean(exportConfig.transparent && batchFormat === "png"),
+          scale: custom ? 1 : Number(exportConfig.scale) || 1,
+          width: custom ? Math.max(64, Math.min(8192, Number(exportConfig.customWidth) || 1920)) : undefined,
+          height: custom ? Math.max(64, Math.min(8192, Number(exportConfig.customHeight) || 1080)) : undefined,
+        });
+        const extension = batchFormat === "jpeg" ? "jpg" : batchFormat;
+        if (blob) zip.file(`${String(index + 1).padStart(2, "0")}-${safeProjectName(saved.name || `camera-${index + 1}`)}.${extension}`, blob);
+      }
+      const output = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      const url = URL.createObjectURL(output);
+      triggerDownload(url, projectFileName(projectName, "camera-batch.zip"));
+      window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+      setError("");
+    } catch (batchError) {
+      setError(`Batch export failed: ${batchError?.message || "unknown error"}`);
+    } finally {
+      setCamera(original.camera);
+      setLensPreset(original.lensPreset);
+      setViewportProjection(original.viewportProjection);
+      setFocusPoint(original.focusPoint);
+      setFocusPosition(original.focusPosition);
+    }
+  }
+
 
   function newProject() {
     takeManualCameraControl();
@@ -1391,6 +1879,12 @@ function App() {
     setViewportGrid(true);
     setViewportGround(true);
     setModelTransform(cloneDefaultModelTransform());
+    setLightingConfig({ ...DEFAULT_LIGHTING });
+    setCustomEnvironmentFile(null);
+    setPerformanceInfo({ fps: 0, quality: "auto", calls: 0, triangles: 0, geometries: 0, textures: 0, estimatedGpuBytes: 0 });
+    setQualityMode("auto");
+    setDebugEnabled(false);
+    setExportConfig({ ...DEFAULT_EXPORT });
     setBackground("white");
     setSize("1024x1024");
     setCustomPrompt("");
@@ -1549,6 +2043,45 @@ function App() {
   const previewScale = 1.18 - camera.distance * 0.0065;
   const previewTranslateZ = 58 - camera.distance * 0.55;
 
+  function renderSceneNode(node, depth = 0, budget = null) {
+    if (!node) return null;
+    const renderBudget = budget || { count: 0, limit: outlinerSearch.trim() ? 3000 : 1200 };
+    if (renderBudget.count >= renderBudget.limit) return null;
+    renderBudget.count += 1;
+    const selectedNode = selectedSceneIds.includes(node.id);
+    const special = ["scene-root", "camera-node", "lights-node"].includes(node.id);
+    const hasChildren = (node.children || []).length > 0;
+    const collapsed = !outlinerSearch.trim() && collapsedSceneIds.has(node.id);
+    return (
+      <div className="outlinerNodeWrap" key={node.id || `${node.name}-${depth}`}>
+        <div
+          className={`outlinerNode ${selectedNode ? "selected" : ""} ${special ? "special" : ""}`}
+          style={{ paddingLeft: `${5 + depth * 13}px` }}
+          onClick={(event) => { if (!special) selectOutlinerObject(node.id, event.ctrlKey || event.metaKey); }}
+          onDoubleClick={() => { if (!special) renameOutlinerObject(node.id, node.name); }}
+        >
+          <button
+            type="button"
+            className={`outlinerDisclosure ${hasChildren ? "hasChildren" : ""}`}
+            onClick={(event) => { event.stopPropagation(); if (hasChildren) toggleSceneCollapsed(node.id); }}
+            tabIndex={hasChildren ? 0 : -1}
+            aria-label={hasChildren ? (collapsed ? "Expand object" : "Collapse object") : undefined}
+          >{hasChildren ? (collapsed ? "▸" : "▾") : ""}</button>
+          <span className="outlinerTypeIcon">{node.type === "Camera" ? <Camera size={12} /> : node.type === "Lights" ? <Lightbulb size={12} /> : node.type === "Scene" ? <Layers size={12} /> : <Box size={12} />}</span>
+          <span className="outlinerNodeName" title={node.name}>{node.name}</span>
+          {!special && (
+            <span className="outlinerActions">
+              <button type="button" title={node.visible ? "Hide" : "Show"} onClick={(event) => { event.stopPropagation(); toggleOutlinerVisibility(node); }}>{node.visible ? <Eye size={11} /> : <EyeOff size={11} />}</button>
+              <button type="button" title={node.locked ? "Unlock" : "Lock"} onClick={(event) => { event.stopPropagation(); toggleOutlinerLock(node); }}>{node.locked ? <Lock size={11} /> : <Unlock size={11} />}</button>
+            </span>
+          )}
+        </div>
+        {!collapsed && (node.children || []).map((child) => renderSceneNode(child, depth + 1, renderBudget))}
+      </div>
+    );
+  }
+
+
   return (
     <main className="shell">
       <header className="blenderAppHeader">
@@ -1569,7 +2102,11 @@ function App() {
         <div className="blenderWorkspaceBar">
           <div className="blenderWorkspaceTabs" aria-label="Workspace tabs">
             <button type="button" className={workspaceTab === "layout" ? "active" : ""} onClick={openLayoutWorkspace}>Layout</button>
+            <button type="button" className={workspaceTab === "scene" ? "active" : ""} onClick={() => openStudioWorkspace("scene", ".sceneOutlinerPanel")}>Scene</button>
             <button type="button" className={workspaceTab === "camera" ? "active" : ""} onClick={openCameraWorkspace}>Camera</button>
+            <button type="button" className={workspaceTab === "material" ? "active" : ""} onClick={() => openStudioWorkspace("material", ".materialStudioSection")}>Material</button>
+            <button type="button" className={workspaceTab === "lighting" ? "active" : ""} onClick={() => openStudioWorkspace("lighting", ".lightingStudioSection")}>Lighting</button>
+            <button type="button" className={workspaceTab === "export" ? "active" : ""} onClick={() => openStudioWorkspace("export", ".exportStudioSection")}>Export</button>
             <button type="button" className={workspaceTab === "prompt" ? "active" : ""} onClick={openPromptWorkspace}>Prompt</button>
           </div>
           <div className="blenderSceneSelector studioProjectIdentity">
@@ -1580,7 +2117,7 @@ function App() {
               onChange={(event) => setProjectName(event.target.value.slice(0, 80))}
               aria-label="Project name"
             />
-            <span className="blenderVersionBadge">V8.0 CAMERA STUDIO</span>
+            <span className="blenderVersionBadge">V8.9 PRODUCTION STUDIO</span>
           </div>
         </div>
       </header>
@@ -1593,15 +2130,40 @@ function App() {
         onChange={(event) => importMultiviewProject(event.target.files?.[0])}
       />
 
+      <input
+        ref={environmentInputRef}
+        hidden
+        type="file"
+        accept=".hdr,.exr"
+        onChange={(event) => chooseEnvironmentFile(event.target.files?.[0])}
+      />
+      <input
+        ref={materialTextureInputRef}
+        hidden
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/bmp,.tga,.dds,.ktx2"
+        onChange={(event) => handleMaterialTextureFile(event.target.files?.[0])}
+      />
+      <input
+        ref={relinkFilesInputRef}
+        hidden
+        type="file"
+        multiple
+        accept={FILE_ACCEPT}
+        onChange={(event) => mergeRelinkFiles(event.target.files)}
+      />
+
       <div className="blenderInfoBar studioInfoBar">
         <span><Camera size={13} /> Camera Workspace</span>
         <span>{assetType === "model" ? `3D ${modelFormat.toUpperCase()} → Camera` : "Reference → Target"}</span>
         <span>{lensLabel(lensPreset)} Lens</span>
         <span>Focus {focusBadgeText(focusPoint, focusPosition)}</span>
         <span className={orbitAuto ? "active" : ""}>{orbitAuto ? `Auto Orbit ${orbitAutoSpeed}°/s` : "Orbit Ready"}</span>
+        {assetType === "model" && <span className="perfInfoChip"><Activity size={11} /> {performanceInfo.fps || 0} FPS · {performanceInfo.quality || qualityMode} · GPU est. {formatBytes(performanceInfo.estimatedGpuBytes || 0)}</span>}
         <div className="studioExportActions">
+          {assetType === "model" && <button type="button" className={debugEnabled ? "active" : ""} onClick={() => setDebugEnabled((value) => !value)}><Activity size={12} /> Debug</button>}
           <button type="button" onClick={exportCameraJson}><Download size={12} /> Camera JSON</button>
-          <button type="button" onClick={exportViewportScreenshot} disabled={assetType !== "model" || modelLoadState.status !== "ready"}><Camera size={12} /> Screenshot</button>
+          <button type="button" onClick={() => exportViewportScreenshot()} disabled={assetType !== "model" || modelLoadState.status !== "ready"}><Camera size={12} /> Screenshot</button>
           {lastSavedAt && <small>Saved {new Date(lastSavedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small>}
         </div>
       </div>
@@ -1840,6 +2402,35 @@ function App() {
             )}
           </div>
 
+          {assetType === "model" && (
+            <div className="sceneOutlinerPanel">
+              <div className="sceneOutlinerHead">
+                <div><strong>Scene / Outliner</strong><small>{sceneGraph ? `${sceneNodeCount} nodes` : "Waiting for model"} · Ctrl-click multi-select</small></div>
+                <div className="sceneOutlinerHeadActions">
+                  <button type="button" title="Frame selected (F)" onClick={frameSelectedObjects} disabled={!selectedSceneIds.length}>F</button>
+                  <button type="button" title="Isolate selected" onClick={isolateSelectedObjects} disabled={!selectedSceneIds.length}><Eye size={11} /></button>
+                  <button type="button" title="Show all objects" onClick={() => threeViewportRef.current?.showAllObjects?.()}><EyeOff size={11} /></button>
+                </div>
+              </div>
+              <label className="outlinerSearchBox"><Search size={12} /><input value={outlinerSearch} onChange={(event) => setOutlinerSearch(event.target.value)} placeholder="Search scene…" /></label>
+              <div className="sceneOutlinerTree">{filteredSceneGraph ? renderSceneNode(filteredSceneGraph, 0, { count: 0, limit: outlinerSearch.trim() ? 3000 : 1200 }) : <div className="outlinerEmpty">Import a 3D model to build the scene hierarchy.</div>}</div>
+              {filteredSceneGraph && filteredSceneNodeCount > (outlinerSearch.trim() ? 3000 : 1200) && <div className="outlinerLimitNote">Large scene: showing the first {outlinerSearch.trim() ? "3,000" : "1,200"} matching nodes. Use Search or collapse groups to narrow the tree.</div>}
+              <div className="outlinerFooterActions">
+                <button type="button" onClick={duplicateSelectedObjects} disabled={!selectedSceneIds.length}><CopyPlus size={12} /> Duplicate</button>
+                <button type="button" onClick={() => selectedSceneIds.length >= 2 && threeViewportRef.current?.parentObjects?.(selectedSceneIds.slice(1), selectedSceneIds[0])} disabled={selectedSceneIds.length < 2}>Parent</button>
+                <button type="button" onClick={() => threeViewportRef.current?.parentObjects?.(selectedSceneIds, null)} disabled={!selectedSceneIds.length}>Unparent</button>
+                <button type="button" onClick={deleteSelectedObjects} disabled={!selectedSceneIds.length}><Trash2 size={12} /> Delete</button>
+              </div>
+              {selectedModelObject && (
+                <div className="selectedObjectStats">
+                  <span><b>{selectedModelObject.name}</b><small>{selectedModelObject.type || "Object"}</small></span>
+                  <span><b>{Number(selectedModelObject.stats?.triangles || 0).toLocaleString()}</b><small>triangles</small></span>
+                  <span><b>{Number(selectedModelObject.stats?.vertices || 0).toLocaleString()}</b><small>vertices</small></span>
+                </div>
+              )}
+            </div>
+          )}
+
           {assetType === "model" ? (
             <div className="modelReferenceInfo">
               <div className="modelReferenceIcon"><Rotate3d size={16} /></div>
@@ -2043,28 +2634,37 @@ function App() {
                     </div>
 
                     {assetType === "model" ? (
-                      <Suspense fallback={<div className="threeLazyFallback">Loading 3D engine…</div>}>
-                        <ThreeModelViewport
-                          ref={threeViewportRef}
-                          mainFile={file}
-                          files={fileBundle}
-                          cameraState={camera}
-                          lensPreset={lensPreset}
-                          focusPosition={focusPosition}
-                          projectionMode={viewportProjection}
-                          shadingMode={viewportShading}
-                          showGrid={viewportGrid}
-                          showGround={viewportGround}
-                          modelTransform={modelTransform}
-                          resetTransformSignal={modelTransformResetSignal}
-                          className="stageThreeModelViewer"
-                          onModelInfo={setModelInfo}
-                          onLoadState={setModelLoadState}
-                          onSelectionChange={setSelectedModelObject}
-                          onCameraStateChange={handleModelCameraChange}
-                          onError={(message) => setError(`3D model: ${message}`)}
-                        />
-                      </Suspense>
+                      <ViewportErrorBoundary onError={(viewportError) => setError(`3D viewport: ${viewportError?.message || "unexpected error"}`)}>
+                        <Suspense fallback={<div className="threeLazyFallback">Loading 3D engine…</div>}>
+                          <ThreeModelViewport
+                            ref={threeViewportRef}
+                            mainFile={file}
+                            files={fileBundle}
+                            cameraState={camera}
+                            lensPreset={lensPreset}
+                            focusPosition={focusPosition}
+                            projectionMode={viewportProjection}
+                            shadingMode={viewportShading}
+                            showGrid={viewportGrid}
+                            showGround={viewportGround}
+                            modelTransform={modelTransform}
+                            resetTransformSignal={modelTransformResetSignal}
+                            selectedObjectIds={selectedSceneIds}
+                            lightingConfig={lightingConfig}
+                            customEnvironmentFile={customEnvironmentFile}
+                            qualityMode={qualityMode}
+                            className="stageThreeModelViewer"
+                            onModelInfo={setModelInfo}
+                            onLoadState={setModelLoadState}
+                            onSelectionChange={handleSceneSelection}
+                            onSceneGraphChange={setSceneGraph}
+                            onMaterialInfo={setMaterialInfo}
+                            onPerformanceInfo={setPerformanceInfo}
+                            onCameraStateChange={handleModelCameraChange}
+                            onError={(message) => setError(`3D model: ${message}`)}
+                          />
+                        </Suspense>
+                      </ViewportErrorBoundary>
                     ) : (
                       <div className="cameraPreview3d proPreview3d editorPreview3d" aria-hidden="true">
                         <div
@@ -2127,6 +2727,20 @@ function App() {
                         </>
                       )}
                     </div>
+                    {assetType === "model" && debugEnabled && (
+                      <div className="viewportDebugPanel">
+                        <div><span>FPS</span><b>{performanceInfo.fps || 0}</b></div>
+                        <div><span>Quality</span><b>{performanceInfo.quality || qualityMode}</b></div>
+                        <div><span>Draw calls</span><b>{performanceInfo.calls || 0}</b></div>
+                        <div><span>Render tris</span><b>{Number(performanceInfo.triangles || 0).toLocaleString()}</b></div>
+                        <div><span>GPU geometries</span><b>{performanceInfo.geometries || 0}</b></div>
+                        <div><span>GPU textures</span><b>{performanceInfo.textures || 0}</b></div>
+                        <div><span>VRAM estimate</span><b>{formatBytes(performanceInfo.estimatedGpuBytes || 0)}</b></div>
+                        <div className="debugWide"><span>GPU</span><b title={performanceInfo.gpuName || ""}>{performanceInfo.gpuName || performanceInfo.renderer || "WebGL"}</b></div>
+                        <div><span>Geometry mem</span><b>{formatBytes(performanceInfo.geometryBytes || 0)}</b></div>
+                        <div><span>Texture mem</span><b>{formatBytes(performanceInfo.textureBytes || 0)}</b></div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="cameraViewportSummary">
@@ -2164,6 +2778,15 @@ function App() {
                         <div className="viewportSegmented shading">
                           {["material", "solid", "wireframe", "normal"].map((mode) => (
                             <button type="button" key={mode} className={viewportShading === mode ? "active" : ""} onClick={() => setViewportShading(mode)}>{mode === "material" ? "Material" : mode === "solid" ? "Solid" : mode === "wireframe" ? "Wire" : "Normal"}</button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="viewportControlGroup">
+                        <span className="viewportControlLabel">Performance quality</span>
+                        <div className="viewportSegmented quality">
+                          {["auto", "low", "medium", "high", "ultra"].map((mode) => (
+                            <button type="button" key={mode} className={qualityMode === mode ? "active" : ""} onClick={() => setQualityMode(mode)}>{mode === "auto" ? `Auto${performanceInfo.quality && performanceInfo.quality !== "auto" ? ` · ${performanceInfo.quality}` : ""}` : mode}</button>
                           ))}
                         </div>
                       </div>
@@ -2216,6 +2839,135 @@ function App() {
                         </div>
                       ))}
                     </section>
+                  )}
+
+                  {assetType === "model" && (
+                    <details className="cameraControlSection studioModuleSection materialStudioSection" open>
+                      <summary><Palette size={13} /><span><b>Material Studio</b><small>Edit selected mesh materials live</small></span><ChevronDown size={13} /></summary>
+                      <div className="studioModuleBody">
+                        {materialInfo.materials.length ? (
+                          <>
+                            <div className="materialSlotList">
+                              {materialInfo.materials.map((material) => (
+                                <button type="button" key={material.id} className={activeMaterial?.id === material.id ? "active" : ""} onClick={() => setActiveMaterialId(material.id)}>
+                                  <span className="materialSwatch" style={{ background: material.color }} />
+                                  <span><b>{material.name}</b><small>{material.type} · {material.textures.length} texture{material.textures.length === 1 ? "" : "s"}</small></span>
+                                </button>
+                              ))}
+                            </div>
+                            {activeMaterial && (
+                              <div className="materialEditorGrid">
+                                <label><span>Base color</span><input type="color" value={activeMaterial.color} onChange={(event) => updateActiveMaterial({ color: event.target.value })} /></label>
+                                <label><span>Emissive</span><input type="color" value={activeMaterial.emissive} onChange={(event) => updateActiveMaterial({ emissive: event.target.value })} /></label>
+                                {activeMaterial.roughness != null && <label className="materialRange"><span>Roughness <b>{Number(activeMaterial.roughness).toFixed(2)}</b></span><input type="range" min="0" max="1" step="0.01" value={activeMaterial.roughness} onChange={(event) => updateActiveMaterial({ roughness: Number(event.target.value) })} /></label>}
+                                {activeMaterial.metalness != null && <label className="materialRange"><span>Metallic <b>{Number(activeMaterial.metalness).toFixed(2)}</b></span><input type="range" min="0" max="1" step="0.01" value={activeMaterial.metalness} onChange={(event) => updateActiveMaterial({ metalness: Number(event.target.value) })} /></label>}
+                                <label className="materialRange"><span>Opacity <b>{Number(activeMaterial.opacity).toFixed(2)}</b></span><input type="range" min="0" max="1" step="0.01" value={activeMaterial.opacity} onChange={(event) => updateActiveMaterial({ opacity: Number(event.target.value) })} /></label>
+                                <button type="button" className={activeMaterial.doubleSided ? "toggleActive" : ""} onClick={() => updateActiveMaterial({ doubleSided: !activeMaterial.doubleSided })}>Double-sided {activeMaterial.doubleSided ? "ON" : "OFF"}</button>
+                                <div className="materialTextureStudio">
+                                  <div className="materialTextureStudioHead"><span>Texture maps</span><small>Click Replace or drop a texture onto a slot.</small></div>
+                                  {[
+                                    ["map", "Base Color"],
+                                    ["normalMap", "Normal"],
+                                    ["roughnessMap", "Roughness"],
+                                    ["metalnessMap", "Metallic"],
+                                    ["emissiveMap", "Emissive"],
+                                    ["alphaMap", "Alpha"],
+                                  ].map(([slot, label]) => {
+                                    const detail = activeMaterial.textureDetails?.find((item) => item.slot === slot);
+                                    const attached = activeMaterial.textures.includes(slot);
+                                    return (
+                                      <div
+                                        className={`materialTextureSlot ${attached ? "attached" : ""}`}
+                                        key={slot}
+                                        onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
+                                        onDrop={(event) => handleMaterialTextureDrop(event, slot)}
+                                      >
+                                        <span className="materialTexturePreview">{detail?.src ? <img src={detail.src} alt="" /> : <Palette size={13} />}</span>
+                                        <span className="materialTextureName"><b>{label}</b><small>{detail?.name || (attached ? "Attached" : "Empty")}</small></span>
+                                        <button type="button" onClick={() => requestMaterialTexture(slot)}>Replace</button>
+                                        <button type="button" className="textureRemoveButton" onClick={() => threeViewportRef.current?.removeMaterialTexture?.(activeMaterial.id, slot)} disabled={!attached} aria-label={`Remove ${label} texture`}><Trash2 size={11} /></button>
+                                      </div>
+                                    );
+                                  })}
+                                  {modelInfo?.dependencies?.missing?.length > 0 && (
+                                    <div className="missingAssetBox">
+                                      <div><strong>Missing assets</strong><small>{modelInfo.dependencies.missing.length} referenced file{modelInfo.dependencies.missing.length === 1 ? "" : "s"} not found.</small></div>
+                                      <ul>{modelInfo.dependencies.missing.slice(0, 6).map((item) => <li key={`${item.kind}-${item.path}`}>{item.path}</li>)}</ul>
+                                      <button type="button" onClick={openRelinkFilesPicker}><FolderOpen size={11} /> Add / relink files</button>
+                                    </div>
+                                  )}
+                                  {modelInfo?.materials?.textured > 0 && modelInfo?.materials?.uvMeshes === 0 && <div className="materialUvWarning">Texture maps are present, but no UV coordinates were detected on the model.</div>}
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <div className="studioModuleEmpty">Select a mesh in the viewport or Outliner to edit its material.</div>
+                        )}
+                      </div>
+                    </details>
+                  )}
+
+                  {assetType === "model" && (
+                    <details className="cameraControlSection studioModuleSection lightingStudioSection">
+                      <summary><SunMedium size={13} /><span><b>Lighting Studio</b><small>Environment + key/fill/rim lighting</small></span><ChevronDown size={13} /></summary>
+                      <div className="studioModuleBody">
+                        <div className="lightingPresetGrid">
+                          {LIGHTING_PRESETS.map((preset) => (
+                            <button type="button" key={preset.key} className={lightingConfig.preset === preset.key ? "active" : ""} onClick={() => applyLightingPreset(preset.key)}>
+                              <b>{preset.label}</b><small>{preset.sub}</small>
+                            </button>
+                          ))}
+                        </div>
+                        {lightingConfig.preset === "custom" && <div className="customEnvironmentRow"><span>{customEnvironmentFile?.name || "No HDR/EXR selected"}</span><button type="button" onClick={openEnvironmentPicker}>Choose HDRI</button></div>}
+                        <label className="lightingSlider"><span>Environment <b>{Number(lightingConfig.environmentStrength).toFixed(2)}</b></span><input type="range" min="0" max="3" step="0.05" value={lightingConfig.environmentStrength} onChange={(event) => updateLighting({ environmentStrength: Number(event.target.value) })} /></label>
+                        <label className="lightingSlider"><span>Environment rotation <b>{Math.round(lightingConfig.environmentRotation)}°</b></span><input type="range" min="0" max="360" step="1" value={lightingConfig.environmentRotation} onChange={(event) => updateLighting({ environmentRotation: Number(event.target.value) })} /></label>
+                        <div className="lightingIntensityGrid">
+                          {[['keyIntensity','Key'],['fillIntensity','Fill'],['rimIntensity','Rim'],['ambientIntensity','Ambient']].map(([key,label]) => (
+                            <label key={key}><span>{label}</span><input type="number" min="0" max="10" step="0.05" value={lightingConfig[key]} onChange={(event) => updateLighting({ [key]: Math.max(0, Number(event.target.value) || 0) })} /></label>
+                          ))}
+                        </div>
+                        <label className="lightingSlider"><span>Temperature <b>{Math.round(lightingConfig.temperature)}K</b></span><input type="range" min="2500" max="10000" step="100" value={lightingConfig.temperature} onChange={(event) => updateLighting({ temperature: Number(event.target.value) })} /></label>
+                        <div className="lightingToggleGrid">
+                          <button type="button" className={lightingConfig.shadows ? "active" : ""} onClick={() => updateLighting({ shadows: !lightingConfig.shadows })}>Shadows {lightingConfig.shadows ? "ON" : "OFF"}</button>
+                          <button type="button" className={lightingConfig.transparentBackground ? "active" : ""} onClick={() => updateLighting({ transparentBackground: !lightingConfig.transparentBackground })}>Transparent BG {lightingConfig.transparentBackground ? "ON" : "OFF"}</button>
+                        </div>
+                      </div>
+                    </details>
+                  )}
+
+                  {assetType === "model" && (
+                    <details className="cameraControlSection studioModuleSection exportStudioSection">
+                      <summary><Download size={13} /><span><b>Export Studio</b><small>Images, JSON, prompt, project, and camera batches</small></span><ChevronDown size={13} /></summary>
+                      <div className="studioModuleBody">
+                        <div className="exportFormatGrid">
+                          {["png", "jpeg", "webp"].map((format) => <button type="button" key={format} className={exportConfig.format === format ? "active" : ""} onClick={() => setExportConfig((current) => ({ ...current, format }))}>{format === "jpeg" ? "JPEG" : format.toUpperCase()}</button>)}
+                        </div>
+                        <div className="exportScaleGrid">
+                          {[1,2,4,"custom"].map((scale) => <button type="button" key={scale} className={exportConfig.scale === scale ? "active" : ""} onClick={() => setExportConfig((current) => ({ ...current, scale }))}>{scale === "custom" ? "Custom" : `${scale}×`}</button>)}
+                        </div>
+                        {exportConfig.scale === "custom" && (
+                          <div className="exportCustomSize"><label><span>W</span><input type="number" min="64" max="8192" value={exportConfig.customWidth} onChange={(event) => setExportConfig((current) => ({ ...current, customWidth: clamp(numberOr(event.target.value, current.customWidth), 64, 8192) }))} /></label><span>×</span><label><span>H</span><input type="number" min="64" max="8192" value={exportConfig.customHeight} onChange={(event) => setExportConfig((current) => ({ ...current, customHeight: clamp(numberOr(event.target.value, current.customHeight), 64, 8192) }))} /></label></div>
+                        )}
+                        <button type="button" className={exportConfig.transparent ? "exportTransparent active" : "exportTransparent"} disabled={exportConfig.format !== "png"} onClick={() => setExportConfig((current) => ({ ...current, transparent: !current.transparent }))}>Transparent PNG {exportConfig.transparent ? "ON" : "OFF"}</button>
+                        <button type="button" className="exportPrimaryButton" onClick={() => exportViewportScreenshot()}><Camera size={13} /> Export viewport image</button>
+                        <div className="exportDataGrid">
+                          <button type="button" onClick={exportCameraJson}><FileJson size={12} /> Camera JSON</button>
+                          <button type="button" onClick={exportSceneJson}><FileJson size={12} /> Scene JSON</button>
+                          <button type="button" onClick={exportTransformJson}><FileJson size={12} /> Transform JSON</button>
+                          <button type="button" onClick={exportPromptTxt}><Download size={12} /> Prompt TXT</button>
+                          <button type="button" onClick={exportMultiviewProject}><Download size={12} /> .multiview</button>
+                          <button type="button" onClick={copyCameraConfiguration}><Copy size={12} /> Copy camera</button>
+                        </div>
+                        <div className="savedCameraPanel">
+                          <div className="savedCameraHead"><strong>Saved cameras</strong><button type="button" onClick={saveCurrentCamera}><Save size={11} /> Save camera</button></div>
+                          {savedCameras.length ? savedCameras.map((saved) => (
+                            <div className="savedCameraRow" key={saved.id}><button type="button" onClick={() => applySavedCamera(saved)}><b>{saved.name}</b><small>Az {Math.round(saved.camera.azimuth)}° · El {Math.round(saved.camera.elevation)}° · {saved.lensPreset}</small></button><button type="button" onClick={() => deleteSavedCamera(saved.id)}><Trash2 size={11} /></button></div>
+                          )) : <small className="savedCameraEmpty">No saved cameras yet.</small>}
+                          <button type="button" className="batchExportButton" onClick={batchExportSavedCameras} disabled={!savedCameras.length}><Download size={12} /> Batch screenshots ZIP</button>
+                        </div>
+                      </div>
+                    </details>
                   )}
 
                   <section className="cameraControlSection orbitEngineSection">

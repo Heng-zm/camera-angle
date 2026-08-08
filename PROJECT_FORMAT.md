@@ -1,28 +1,71 @@
-# `.multiview` Project Format — V8.0
+# `.multiview` Project Format — V8.9
 
-`.multiview` is UTF-8 JSON with the top-level identifier:
+`.multiview` is a UTF-8 JSON document.
 
 ```json
 {
   "format": "multiview-camera-studio",
-  "version": "8.0"
+  "version": "8.9"
 }
 ```
 
-The project stores:
+## Top-level data
 
 - `projectName`
 - `savedAt`
-- `asset`: asset type, primary filename, format and file manifest
-- `camera`: azimuth, elevation, distance, lens preset, projection and focus target
-- `viewport`: shading, grid and ground state
-- `objectTransform`: position, rotation and scale
-- `prompt`: angle mode, selected angles, source view, background, framing, custom instruction and generated prompt results
-- `selection`: selected model object metadata when available
-- `modelSummary`: lightweight geometry/material statistics
+- `asset`
+  - asset type
+  - primary filename
+  - model/image format
+  - external file manifest
+  - `embedded: false`
+- `camera`
+  - azimuth
+  - elevation
+  - distance
+  - lens preset
+  - projection
+  - focus target and position
+- `viewport`
+  - shading mode
+  - grid
+  - ground
+  - quality mode
+  - debug panel state
+- `lighting`
+  - environment preset
+  - environment strength/rotation
+  - key/fill/rim/ambient intensities
+  - temperature
+  - shadows
+  - transparent background
+  - custom environment filename when one was used
+- `exportSettings`
+  - image format
+  - scale/custom size
+  - transparency
+  - quality
+- `savedCameras`
+- `objectTransform`
+  - position XYZ
+  - rotation XYZ
+  - scale XYZ
+- `prompt`
+  - preset/custom 3D mode
+  - selected target angles
+  - source view for image workflows
+  - background/framing
+  - custom prompt instruction
+  - generated prompt results
+- `selection`
+- `modelSummary`
 
 ## External asset policy
 
-V8.0 does not embed model/image binaries in `.multiview`. `asset.files` is a manifest used to tell the user which local files should be re-imported. This keeps `.multiview` files small and makes them practical even when a model bundle is hundreds of megabytes.
+Model binaries, texture binaries, `.bin` resources, and HDR/EXR files are not embedded in `.multiview`. The project contains filenames and configuration so the original local assets can be relinked.
 
-Future versions can extend the schema while retaining the `format` identifier and version field.
+This keeps project files small even when a 3D bundle is hundreds of megabytes.
+
+## Compatibility
+
+Importers should check `format` first and then use `version` for optional migrations. Unknown future fields should be ignored rather than treated as an error.

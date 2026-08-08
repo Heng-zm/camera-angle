@@ -3,8 +3,10 @@ setlocal
 cd /d "%~dp0"
 
 echo ========================================
-echo MultiView Camera Studio V8.0
-echo Real 3D · Projects · Camera Export · Browser-only
+echo MultiView Camera Studio V8.9 Production
+echo Worker Import · Outliner · Materials · Lighting · Export
+echo Browser-only
+
 echo ========================================
 echo.
 
@@ -29,6 +31,15 @@ if errorlevel 1 (
   echo.
   echo Dependency repair failed.
   echo Try manually: npm install --prefix client
+  pause
+  exit /b 1
+)
+
+echo Preparing local 3D decoder assets...
+call npm run prepare:decoders --prefix client
+if errorlevel 1 (
+  echo.
+  echo Decoder preparation failed.
   pause
   exit /b 1
 )

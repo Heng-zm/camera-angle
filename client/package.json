@@ -1,23 +1,25 @@
 {
   "name": "multiview-camera-studio-client",
   "private": true,
-  "version": "8.0.1",
+  "version": "8.9.0",
   "type": "module",
   "scripts": {
     "check:deps": "node scripts/ensure-dependencies.mjs",
-    "predev": "npm run check:deps",
+    "predev": "npm run check:deps && npm run prepare:decoders",
     "dev": "vite --host 127.0.0.1",
-    "prebuild": "npm run check:deps",
+    "prebuild": "npm run check:deps && npm run prepare:decoders",
     "build": "vite build",
-    "prepreview": "npm run check:deps",
-    "preview": "vite preview --host 127.0.0.1"
+    "prepreview": "npm run check:deps && npm run prepare:decoders",
+    "preview": "vite preview --host 127.0.0.1",
+    "prepare:decoders": "node scripts/copy-three-decoders.mjs"
   },
   "dependencies": {
     "vite": "^5.4.21",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "lucide-react": "^0.468.0",
-    "three": "^0.185.1"
+    "three": "^0.185.1",
+    "jszip": "^3.10.1"
   },
   "devDependencies": {}
 }

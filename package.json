@@ -1,7 +1,7 @@
 {
   "name": "multiview-camera-studio",
   "private": true,
-  "version": "8.0.1",
+  "version": "8.9.0",
   "scripts": {
     "install:all": "npm install --prefix client",
     "repair:deps": "npm run check:deps --prefix client",
