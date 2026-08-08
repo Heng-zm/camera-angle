@@ -1,0 +1,23 @@
+{
+  "name": "multiview-camera-prompt-builder-client",
+  "private": true,
+  "version": "7.3.2",
+  "type": "module",
+  "scripts": {
+    "check:deps": "node scripts/ensure-dependencies.mjs",
+    "predev": "npm run check:deps",
+    "dev": "vite --host 127.0.0.1",
+    "prebuild": "npm run check:deps",
+    "build": "vite build",
+    "prepreview": "npm run check:deps",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "vite": "^5.4.21",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "lucide-react": "^0.468.0",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {}
+}

@@ -1,0 +1,12 @@
+{
+  "name": "multiview-camera-prompt-builder",
+  "private": true,
+  "version": "7.3.2",
+  "scripts": {
+    "install:all": "npm install --prefix client",
+    "repair:deps": "npm run check:deps --prefix client",
+    "dev": "npm run dev --prefix client",
+    "build": "npm run build --prefix client",
+    "preview": "npm run preview --prefix client"
+  }
+}
